@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { User, Lock, Mic, Check, ArrowLeft, Moon, Sun, Eye, EyeOff } from 'lucide-react';
+import { User, Lock, Mic, Check, ArrowLeft, Moon, Sun, Eye, EyeOff, AlertCircle } from 'lucide-react';
 import Waveform from './Waveform';
+import axios from 'axios';
 
 interface RegistrationProps {
   darkMode: boolean;
@@ -13,27 +14,96 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [password, setPassword] = useState(''); // Acts as PIN
   const [confirmPassword, setConfirmPassword] = useState('');
+  
+  // Audio & API States
   const [isRecording, setIsRecording] = useState(false);
   const [voiceRecorded, setVoiceRecorded] = useState(false);
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  
+  // UI States
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   const handleNextStep = () => {
     if (step < 3) setStep(step + 1);
   };
 
-  const handleRecordVoice = () => {
-    setIsRecording(true);
-    setTimeout(() => {
-      setIsRecording(false);
-      setVoiceRecorded(true);
-    }, 3000);
+  const handleRecordVoice = async () => {
+    try {
+      setErrorMessage('');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorderRef.current = new MediaRecorder(stream);
+      chunksRef.current = [];
+
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorderRef.current.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        setAudioBlob(blob);
+        setVoiceRecorded(true);
+        // Turn off mic
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorderRef.current.start();
+      setIsRecording(true);
+
+      // Auto-stop after 3 seconds
+      setTimeout(() => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          mediaRecorderRef.current.stop();
+          setIsRecording(false);
+        }
+      }, 3000);
+
+    } catch (err) {
+      console.error("Mic Error:", err);
+      setErrorMessage("Microphone access denied. Please check permissions.");
+    }
   };
 
-  const handleSubmitVoice = () => {
-    setStep(3);
+  const handleSubmitVoice = async () => {
+    if (!audioBlob || !username || !password) return;
+
+    setIsSubmitting(true);
+    setErrorMessage('');
+
+    const formData = new FormData();
+    formData.append('username', username);
+    formData.append('pin', password); // We use the password field as the PIN
+    // Convert blob to file
+    const file = new File([audioBlob], "register.webm", { type: "audio/webm" });
+    formData.append('audio_file', file);
+
+    try {
+      const response = await axios.post('http://127.0.0.1:8000/register', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+
+      if (response.status === 200) {
+        setStep(3); // Go to success screen
+      }
+    } catch (error: any) {
+      console.error("Registration failed", error);
+      if (error.response?.data?.detail) {
+        setErrorMessage(error.response.data.detail);
+      } else {
+        setErrorMessage("Server connection failed.");
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -67,7 +137,6 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
         animate={{ opacity: 1, y: 0 }}
         className="max-w-2xl w-full"
       >
-        {/* Header */}
         <motion.h1
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -117,6 +186,18 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
           </span>
         </div>
 
+        {/* ERROR MESSAGE */}
+        {errorMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-6 p-4 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-xl flex items-center gap-2 justify-center"
+          >
+            <AlertCircle className="w-5 h-5" />
+            {errorMessage}
+          </motion.div>
+        )}
+
         {/* Main Card */}
         <motion.div
           layout
@@ -150,7 +231,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
 
                 <div>
                   <label className="block text-gray-700 dark:text-gray-300 mb-2">
-                    Password
+                    PIN (Password)
                   </label>
                   <div className="relative">
                     <Lock className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
@@ -159,7 +240,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       className="w-full pl-12 pr-12 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-gray-900 dark:text-white"
-                      placeholder="Enter password"
+                      placeholder="Enter PIN (e.g., 1234)"
                     />
                     <button
                       onClick={() => setShowPassword(!showPassword)}
@@ -172,7 +253,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
 
                 <div>
                   <label className="block text-gray-700 dark:text-gray-300 mb-2">
-                    Confirm Password
+                    Confirm PIN
                   </label>
                   <div className="relative">
                     <Lock className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
@@ -181,7 +262,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
                       className="w-full pl-12 pr-12 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-gray-900 dark:text-white"
-                      placeholder="Confirm password"
+                      placeholder="Confirm PIN"
                     />
                     <button
                       onClick={() => setShowConfirmPassword(!showConfirmPassword)}
@@ -218,7 +299,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                     Please speak the phrase:
                   </p>
                   <div className="bg-blue-50 dark:bg-blue-900/30 border-2 border-blue-200 dark:border-blue-800 rounded-xl p-4">
-                    <p className="text-blue-700 dark:text-blue-300">
+                    <p className="text-blue-700 dark:text-blue-300 font-medium">
                       "My voice is my password."
                     </p>
                   </div>
@@ -253,7 +334,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                   </motion.button>
 
                   <p className="text-gray-600 dark:text-gray-400 text-sm">
-                    {isRecording ? 'Recording...' : voiceRecorded ? 'Recording complete!' : 'Click to record'}
+                    {isRecording ? 'Recording...' : voiceRecorded ? 'Voice Captured!' : 'Click to record'}
                   </p>
                 </div>
 
@@ -272,10 +353,10 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
                   onClick={handleSubmitVoice}
-                  disabled={!voiceRecorded}
+                  disabled={!voiceRecorded || isSubmitting}
                   className="w-full py-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-xl shadow-lg hover:shadow-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Submit Voice Sample
+                  {isSubmitting ? "Registering..." : "Submit Voice Sample"}
                 </motion.button>
               </motion.div>
             )}

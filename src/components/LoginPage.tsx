@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { User, Lock, Mic, ArrowLeft, Moon, Sun, Eye, EyeOff } from 'lucide-react';
+import { User, Lock, Mic, ArrowLeft, Moon, Sun, Eye, EyeOff, AlertTriangle } from 'lucide-react';
 import Waveform from './Waveform';
+import axios from 'axios';
 
 interface LoginPageProps {
   darkMode: boolean;
@@ -13,51 +14,99 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
   const navigate = useNavigate();
   const [username, setUsername] = useState('');
   const [pin, setPin] = useState('');
-  const [isRecording, setIsRecording] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [voiceRecorded, setVoiceRecorded] = useState(false);
   const [showPin, setShowPin] = useState(false);
   const [step, setStep] = useState<'credentials' | 'voice'>('credentials');
-
-  const phrases = [
-    "The sky is blue today",
-    "Security is my priority",
-    "My voice is my password",
-    "Welcome to the future",
-  ];
-  const [currentPhrase] = useState(phrases[Math.floor(Math.random() * phrases.length)]);
+  
+  // Audio & API States
+  const [isRecording, setIsRecording] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   const handleCredentialsSubmit = () => {
     if (username && pin) {
       setStep('voice');
+      setErrorMessage('');
     }
   };
 
-  const handleRecordVoice = () => {
-    setIsRecording(true);
-    setTimeout(() => {
-      setIsRecording(false);
-      setVoiceRecorded(true);
-      setIsProcessing(true);
-      
-      setTimeout(() => {
-        setIsProcessing(false);
-        setIsVerifying(true);
+  const handleRecordVoice = async () => {
+    try {
+      setErrorMessage('');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorderRef.current = new MediaRecorder(stream);
+      chunksRef.current = [];
+
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorderRef.current.onstop = () => {
+        const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        // Turn off mic
+        stream.getTracks().forEach(track => track.stop());
         
-        setTimeout(() => {
-          // Simulate success
-          navigate('/auth-success');
-        }, 1500);
-      }, 1500);
-    }, 3000);
+        // AUTOMATICALLY SUBMIT AFTER RECORDING STOPS
+        handleLoginSubmit(audioBlob);
+      };
+
+      mediaRecorderRef.current.start();
+      setIsRecording(true);
+
+      // Record for 3 seconds
+      setTimeout(() => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          mediaRecorderRef.current.stop();
+          setIsRecording(false);
+          setIsProcessing(true);
+        }
+      }, 3000);
+
+    } catch (err) {
+      console.error("Mic Error:", err);
+      setErrorMessage("Microphone access denied.");
+    }
+  };
+
+  const handleLoginSubmit = async (audioBlob: Blob) => {
+    const formData = new FormData();
+    formData.append('username', username);
+    formData.append('pin', pin);
+    const file = new File([audioBlob], "login.webm", { type: "audio/webm" });
+    formData.append('audio_file', file);
+
+    try {
+      const response = await axios.post('http://127.0.0.1:8000/login', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+
+      if (response.status === 200) {
+        // Success!
+        navigate('/auth-success');
+      }
+    } catch (error: any) {
+      console.error("Login failed", error);
+      setIsProcessing(false);
+      
+      if (error.response?.data?.detail) {
+        setErrorMessage(error.response.data.detail);
+      } else {
+        setErrorMessage("Authentication failed. Please try again.");
+      }
+
+      // Optional: Redirect to failure page after a short delay or immediately
+      // navigate('/auth-failure');
+    }
   };
 
   const handleRetry = () => {
     setIsRecording(false);
-    setVoiceRecorded(false);
     setIsProcessing(false);
-    setIsVerifying(false);
+    setErrorMessage('');
   };
 
   return (
@@ -126,6 +175,18 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
           </div>
         </div>
 
+        {/* ERROR MESSAGE */}
+        {errorMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-6 p-4 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-xl flex items-center gap-2 justify-center"
+          >
+            <AlertTriangle className="w-5 h-5" />
+            {errorMessage}
+          </motion.div>
+        )}
+
         {/* Main Card */}
         <motion.div
           layout
@@ -163,7 +224,7 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
 
                 <div>
                   <label className="block text-gray-700 dark:text-gray-300 mb-2">
-                    PIN / Password
+                    PIN
                   </label>
                   <div className="relative">
                     <Lock className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
@@ -172,7 +233,7 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                       value={pin}
                       onChange={(e) => setPin(e.target.value)}
                       className="w-full pl-12 pr-12 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-gray-900 dark:text-white"
-                      placeholder="Enter PIN or password"
+                      placeholder="Enter PIN (e.g. 1234)"
                     />
                     <button
                       onClick={() => setShowPin(!showPin)}
@@ -213,8 +274,8 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                     Speak the phrase displayed below:
                   </p>
                   <div className="bg-blue-50 dark:bg-blue-900/30 border-2 border-blue-200 dark:border-blue-800 rounded-xl p-6">
-                    <p className="text-blue-700 dark:text-blue-300">
-                      "{currentPhrase}"
+                    <p className="text-blue-700 dark:text-blue-300 font-medium">
+                      "My voice is my password"
                     </p>
                   </div>
                 </div>
@@ -225,7 +286,7 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={handleRecordVoice}
-                    disabled={isRecording || isProcessing || isVerifying}
+                    disabled={isRecording || isProcessing}
                     className="relative"
                   >
                     <motion.div
@@ -241,8 +302,6 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                         ? 'bg-gradient-to-br from-red-500 to-red-600' 
                         : isProcessing
                         ? 'bg-gradient-to-br from-yellow-500 to-yellow-600'
-                        : isVerifying
-                        ? 'bg-gradient-to-br from-green-500 to-green-600'
                         : 'bg-gradient-to-br from-blue-600 to-blue-700'
                     }`}>
                       <Mic className="w-16 h-16 text-white" />
@@ -266,19 +325,10 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                         animate={{ opacity: 1 }}
                         className="text-yellow-600 dark:text-yellow-400"
                       >
-                        Processing...
+                        Verifying with AI...
                       </motion.p>
                     )}
-                    {isVerifying && (
-                      <motion.p
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        className="text-green-600 dark:text-green-400"
-                      >
-                        Verifying...
-                      </motion.p>
-                    )}
-                    {!isRecording && !isProcessing && !isVerifying && (
+                    {!isRecording && !isProcessing && (
                       <p className="text-gray-600 dark:text-gray-400 text-sm">
                         Click microphone to record
                       </p>
@@ -296,29 +346,13 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                   </motion.div>
                 )}
 
-                {/* Progress Indicator */}
-                {(isProcessing || isVerifying) && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 overflow-hidden"
-                  >
-                    <motion.div
-                      initial={{ width: 0 }}
-                      animate={{ width: "100%" }}
-                      transition={{ duration: 1.5 }}
-                      className="h-full bg-gradient-to-r from-blue-500 to-blue-600"
-                    />
-                  </motion.div>
-                )}
-
                 {/* Action Buttons */}
                 <div className="flex gap-4">
                   <motion.button
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
                     onClick={handleRetry}
-                    disabled={isRecording || isProcessing || isVerifying}
+                    disabled={isRecording || isProcessing}
                     className="flex-1 py-3 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-xl hover:bg-gray-300 dark:hover:bg-gray-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Retry
@@ -327,7 +361,7 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
                     onClick={() => setStep('credentials')}
-                    disabled={isRecording || isProcessing || isVerifying}
+                    disabled={isRecording || isProcessing}
                     className="flex-1 py-3 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-xl hover:bg-gray-300 dark:hover:bg-gray-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Back
