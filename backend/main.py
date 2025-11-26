@@ -1,39 +1,37 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # <--- IMPORT THIS
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 import os
+import shutil
 from sqlalchemy.orm import Session
-from fastapi import Depends
-from database import get_db
+# --- CORRECTED IMPORT: Import 'engine' from database, not models ---
+from database import get_db, engine 
 import models
 import utils
-import os
 
+# Initialize Database Tables
+# Fixed: Use 'engine' directly
+models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Voice Based MFA")
+app = FastAPI(title="Secure Voice MFA System")
 
-# --- CORS CONFIGURATION ---
-origins = [
-    "http://localhost:3000",  # The React Frontend
-    "http://127.0.0.1:3000",
-]
-
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# --------------------------
 
-# Create the uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
 
 @app.get("/")
 def home():
-    return {"message": "Voice MFA Backend is Running!"}
+    return {"message": "Secure Voice MFA Backend Running - ALL GATES ACTIVE"}
 
-# --- Phase 1: Enrollment (UPDATED) ---
+# ==========================================
+# PHASE 1: ENROLLMENT (Register)
+# ==========================================
 @app.post("/register")
 async def register_user(
     username: str = Form(...), 
@@ -41,50 +39,70 @@ async def register_user(
     audio_file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    # 1. Check if user already exists
-    existing_user = db.query(models.User).filter(models.User.username == username).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Username already taken")
+    print(f"--- Registering User: {username} ---")
 
-    # 2. Save audio temporarily
-    file_location = f"uploads/{audio_file.filename}"
-    with open(file_location, "wb") as file_object:
-        file_object.write(audio_file.file.read())
-    
-    # 3. Process Audio (Get Voice Embedding)
-    voice_embedding = utils.process_audio_file(file_location)
-    
-    # Clean up the raw upload
-    os.remove(file_location)
+    # 1. Database Check
+    existing = db.query(models.User).filter(models.User.username == username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already exists.")
 
-    if voice_embedding is None:
-        raise HTTPException(status_code=500, detail="Error processing audio file. Ensure FFmpeg is installed.")
+    # 2. Save File Temporarily
+    temp_filename = f"uploads/reg_{username}_{audio_file.filename}"
+    with open(temp_filename, "wb") as buffer:
+        shutil.copyfileobj(audio_file.file, buffer)
 
-    # 4. Encrypt Voiceprint
-    encrypted_voice = utils.encrypt_voiceprint(voice_embedding)
+    try:
+        # 3. GATE 0: Load & Enhance Audio (Remove Noise)
+        print("Step 1: Enhancing Audio...")
+        clean_signal = utils.load_and_enhance_audio(temp_filename)
+        
+        if clean_signal is None:
+            raise HTTPException(status_code=400, detail="Audio file corrupted or unreadable.")
 
-    # 5. Hash PIN
-    hashed_pin = utils.hash_pin(pin)
+        # 4. GATE 1: Anti-Spoof Check (Uses file path)
+        print("Step 2: Deepfake Detection...")
+        is_real, confidence, label = utils.check_spoofing(temp_filename)
+        print(f"Spoof Result: {label} ({confidence:.4f})")
+        
+        if not is_real:
+            raise HTTPException(status_code=400, detail="Registration rejected. Synthetic audio detected.")
 
-    # 6. Save to Database
-    new_user = models.User(
-        username=username,
-        password_hash=hashed_pin,
-        salt="bcrypt_handled", # bcrypt handles salt internally, we just store a placeholder or remove this col later
-        voiceprint=encrypted_voice
-    )
-    
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    
-    return {
-        "status": "success",
-        "message": f"User {username} registered successfully!",
-        "user_id": new_user.id
-    }
+        # 5. Extract Voice Embedding
+        print("Step 3: Generating & Encrypting Voiceprint...")
+        embedding = utils.get_voice_embedding(clean_signal)
 
-# --- Phase 2: Authentication (IMPLEMENTED) ---
+        # 6. Encrypt (AES-256)
+        print("Step 3: Encrypting Data...")
+        encrypted_blob = utils.encrypt_voiceprint(embedding)
+
+        # 7. Hash PIN
+        hashed_pin = utils.hash_pin(pin)
+
+        # 8. Save to DB
+        new_user = models.User(
+            username=username,
+            password_hash=hashed_pin,
+            salt="bcrypt",
+            voiceprint=encrypted_blob
+        )
+        db.add(new_user)
+        db.commit()
+        
+        return {"status": "success", "message": "User registered securely."}
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Server Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal processing error.")
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+
+
+# ==========================================
+# PHASE 2: AUTHENTICATION (Login)
+# ==========================================
 @app.post("/login")
 async def login_user(
     username: str = Form(...), 
@@ -92,46 +110,68 @@ async def login_user(
     audio_file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    # 1. Find the user
+    print(f"\n--- Login Attempt: {username} ---")
+
+    # 1. Identity Check
     user = db.query(models.User).filter(models.User.username == username).first()
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=401, detail="Invalid Credentials")
 
-    # 2. Verify PIN
+    # 2. PIN Verification
     if not utils.verify_pin(pin, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid PIN")
+        print("PIN Mismatch")
+        raise HTTPException(status_code=401, detail="Invalid Credentials")
+    print("PIN Verified.")
 
-    # 3. Process the New Audio (Live Sample)
-    file_location = f"uploads/login_{username}_{audio_file.filename}"
-    with open(file_location, "wb") as file_object:
-        file_object.write(audio_file.file.read())
-    
-    new_voice_embedding = utils.process_audio_file(file_location)
-    os.remove(file_location) # Clean up
+    # 3. Audio Processing
+    temp_filename = f"uploads/login_{username}_{audio_file.filename}"
+    with open(temp_filename, "wb") as buffer:
+        shutil.copyfileobj(audio_file.file, buffer)
 
-    if new_voice_embedding is None:
-        raise HTTPException(status_code=500, detail="Error processing audio")
+    try:
+        # --- GATE 0: Noise Cancellation ---
+        print("Gate 0: Cleaning Audio (Noise Reduction)...")
+        clean_signal = utils.load_and_enhance_audio(temp_filename)
+        if clean_signal is None:
+            raise HTTPException(status_code=400, detail="Audio processing failed.")
 
-    # 4. Decrypt the Stored Voiceprint
-    stored_voice_embedding = utils.decrypt_voiceprint(user.voiceprint)
+        # --- GATE 1: Anti-Spoofing (Deepfake Detection) ---
+        print("Gate 1: Anti-Spoofing...")
+        is_real, confidence, label = utils.check_spoofing(temp_filename)
+        
+        if not is_real: 
+            print(f"REJECTED: Spoof detected ({label})")
+            raise HTTPException(status_code=403, detail="Access Denied: Fake Audio Detected.")
+        print(f"PASSED: Live Human ({confidence:.4f})")
 
-    # 5. Compare Voiceprints (Cosine Similarity)
-    similarity = utils.compare_faces(new_voice_embedding, stored_voice_embedding)
-    
-    # 6. Make a Decision
-    # Threshold: 0.75 is a good starting point. 
-    # Above 0.75 = Same Person. Below = Imposter.
-    THRESHOLD = 0.75
-    
-    if similarity >= THRESHOLD:
-        return {
-            "status": "success", 
-            "message": "Authentication Successful!", 
-            "similarity_score": round(similarity, 4),
-            "access_token": "fake-jwt-token-for-demo"
-        }
-    else:
-        raise HTTPException(
-            status_code=401, 
-            detail=f"Voice verification failed. Similarity: {round(similarity, 4)}"
-        )
+        # --- GATE 2: Speaker Verification ---
+        print("Gate 2: Biometric Matching...")
+        
+        # Generate new embedding from CLEAN audio
+        login_embedding = utils.get_voice_embedding(clean_signal)
+        
+        # Decrypt stored embedding
+        stored_embedding = utils.decrypt_voiceprint(user.voiceprint)
+        if stored_embedding is None:
+            raise HTTPException(status_code=500, detail="Database Integrity Error.")
+
+        # Compare
+        score = utils.compare_faces(login_embedding, stored_embedding)
+        print(f"Similarity Score: {score:.4f}")
+
+        THRESHOLD = 0.70 
+        
+        if score >= THRESHOLD:
+            return {
+                "status": "success",
+                "message": "Access Granted",
+                "user": username,
+                "score": round(score, 4),
+                "checks": ["PIN: OK", "Liveness: OK", "VoiceMatch: OK"]
+            }
+        else:
+            raise HTTPException(status_code=401, detail=f"Voice verification failed. Score: {round(score, 2)}")
+
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
