@@ -5,29 +5,34 @@ interface WaveformProps {
 }
 
 export default function Waveform({ isActive }: WaveformProps) {
-  const bars = Array.from({ length: 30 }, (_, i) => i);
+  const bars = Array.from({ length: 20 }, (_, i) => i);
 
   return (
-    <div className="flex items-center justify-center gap-1 h-24 bg-gradient-to-br from-gray-50 to-blue-50 dark:from-gray-900 dark:to-gray-800 rounded-2xl p-4 border border-gray-200 dark:border-gray-700">
+    <div className="flex items-center justify-center gap-1 h-16 w-full max-w-[200px]">
       {bars.map((bar, index) => {
-        const height = Math.random() * 60 + 20;
-        const delay = index * 0.03;
+        // Random height variation logic
+        const baseHeight = 30; // 30%
+        const randomHeight = Math.random() * 60 + 20;
         
         return (
           <motion.div
             key={bar}
-            initial={{ scaleY: 0.3 }}
+            initial={{ height: '20%' }}
             animate={isActive ? {
-              scaleY: [0.3, Math.random() + 0.5, 0.3],
-            } : { scaleY: 0.3 }}
+              height: [`${baseHeight}%`, `${randomHeight}%`, `${baseHeight}%`],
+              backgroundColor: ['#3b82f6', '#60a5fa', '#3b82f6'] // Pulse color too
+            } : { 
+              height: '20%',
+              backgroundColor: '#9ca3af' // gray when inactive
+            }}
             transition={{
-              duration: 0.6,
+              duration: 0.5,
               repeat: isActive ? Infinity : 0,
-              delay: delay,
+              delay: index * 0.05,
               ease: "easeInOut",
             }}
-            className="w-1.5 bg-gradient-to-t from-blue-500 to-blue-600 rounded-full origin-center"
-            style={{ height: `${height}%` }}
+            className="w-1.5 rounded-full"
+            style={{ backgroundColor: '#3b82f6' }}
           />
         );
       })}

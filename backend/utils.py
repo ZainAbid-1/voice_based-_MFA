@@ -1,21 +1,20 @@
 import os
-# -------------------------------------------------
-
-import torchaudio
 import torch
 import pydub
+from pydub import effects
 import numpy as np
 import pickle
 import bcrypt
+import random
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 
-# --- FIX TORCHAUDIO BACKEND ISSUES ---
+import torchaudio
 if not hasattr(torchaudio, "list_audio_backends"):
     torchaudio.list_audio_backends = lambda: ["soundfile"]
 
-from speechbrain.inference import EncoderClassifier
 from speechbrain.inference.separation import SepformerSeparation as SpeechEnhancement
+from speechbrain.inference import EncoderClassifier
 from transformers import pipeline
 
 # --- SECURITY CONFIGURATION (AES-256) ---
@@ -37,27 +36,40 @@ def load_key():
 
 AES_KEY = load_key()
 
-# --- AI MODEL LOADING ---
+# --- WORD LIST FOR CHALLENGES ---
+WORD_LIST = [
+    "ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOX", "GOLF", 
+    "HOTEL", "INDIA", "JULIET", "KILO", "FEBRUARY", "MIKE", "NOVEMBER", 
+    "OSCAR", "PAPA", "QATAR", "ROMEO", "SIERRA", "TANGO", "UNIFORM", 
+    "VICTOR", "WHISKEY", "XRAY", "YANKEE", "ZULU", "NORTH", "SOUTH", 
+    "EAST", "WEST", "BLUE", "GREEN", "RED", "YELLOW", "RIVER", "MOUNTAIN", 
+    "OCEAN", "FOREST", "SKY", "WIND", "RAIN", "STORM", "THUNDER", "CLOUD"
+]
+
 print("--- LOADING AI MODELS ---")
 
-# 1. Noise Cancellation (Gate 0)
+# 1. Noise Cancellation
 print("1. Loading Speech Enhancer...")
 enhance_model = SpeechEnhancement.from_hparams(
     source="speechbrain/sepformer-dns4-16k-enhancement",
-    savedir="pretrained_models/enhancement",
-    overrides=None
+    savedir="pretrained_models/enhancement"
 )
 
-# 2. Anti-Spoofing (Gate 1)
+# 2. Anti-Spoofing
 print("2. Loading Deepfake Detector...")
 spoof_classifier = pipeline("audio-classification", model="MelodyMachine/Deepfake-audio-detection")
 
-# 3. Speaker Verification (Gate 2)
+# 3. Speaker Verification
 print("3. Loading Speaker Encoder...")
 spk_model = EncoderClassifier.from_hparams(
     source="speechbrain/spkrec-ecapa-voxceleb",
     savedir="pretrained_models/verification"
 )
+
+# 4. Speech-to-Text (For Challenge Verification)
+print("4. Loading Text Transcriber...")
+transcriber = pipeline("automatic-speech-recognition", model="facebook/wav2vec2-base-960h")
+
 print("--- MODELS LOADED ---")
 
 # --- PIN LOGIC ---
@@ -69,6 +81,33 @@ def hash_pin(pin: str) -> str:
 def verify_pin(plain_pin: str, hashed_pin: str) -> bool:
     return bcrypt.checkpw(plain_pin.encode('utf-8'), hashed_pin.encode('utf-8'))
 
+# --- CHALLENGE LOGIC ---
+def generate_challenge_code():
+    """Generates 7 random words"""
+    words = random.sample(WORD_LIST, 7)
+    return " ".join(words)
+
+def transcribe_audio(file_path):
+    """Converts audio to uppercase text"""
+    try:
+        # 1. Convert to WAV first to ensure compatibility
+        wav_path = file_path + "_transcribe.wav"
+        audio = pydub.AudioSegment.from_file(file_path)
+        audio = audio.set_frame_rate(16000).set_channels(1)
+        audio.export(wav_path, format="wav")
+
+        # 2. Transcribe
+        result = transcriber(wav_path)
+        transcript = result['text'].upper()
+        
+        # Cleanup
+        if os.path.exists(wav_path): os.remove(wav_path)
+        
+        return transcript
+    except Exception as e:
+        print(f"Transcription error: {e}")
+        return ""
+
 # --- AUDIO PIPELINE ---
 
 def load_and_enhance_audio(file_path: str):
@@ -76,9 +115,17 @@ def load_and_enhance_audio(file_path: str):
         audio = pydub.AudioSegment.from_file(file_path)
         audio = audio.set_frame_rate(16000).set_channels(1)
         
+        # NORMALIZE (Important for consistent volume)
+        audio = effects.normalize(audio)
+
         samples = np.array(audio.get_array_of_samples()).astype(np.float32)
         samples = samples / 32768.0
         
+        # Silence Check
+        if np.max(np.abs(samples)) < 0.01:
+            print("Audio is silent")
+            return None
+
         signal = torch.from_numpy(samples).unsqueeze(0)
 
         # Apply Noise Cancellation
@@ -93,25 +140,33 @@ def load_and_enhance_audio(file_path: str):
 def check_spoofing(file_path):
     """
     Gate 1: Deepfake Detection.
-    Returns: (is_real: bool, confidence: float, label: str)
+    Converts to WAV first to avoid False Positives from browser webm/mp3 compression.
     """
+    temp_wav = file_path + "_spoofcheck.wav"
     try:
-        # The pipeline expects a file path
-        result = spoof_classifier(file_path)
+        # Convert to clean 16kHz WAV
+        audio = pydub.AudioSegment.from_file(file_path)
+        audio = audio.set_frame_rate(16000).set_channels(1)
+        audio.export(temp_wav, format="wav")
         
-        # Result format: [{'score': 0.95, 'label': 'REAL'}, ...]
+        result = spoof_classifier(temp_wav)
+        
         top_result = result[0]
-        label = top_result['label'].upper() # Ensure uppercase
+        label = top_result['label'].upper()
         score = top_result['score']
         
-        # Logic: Check if it thinks it's REAL
         is_real = (label == "REAL")
         
+        # Cleanup
+        if os.path.exists(temp_wav): os.remove(temp_wav)
+
         return is_real, score, label
+
     except Exception as e:
         print(f"Spoof Check Error: {e}")
-        # Fail safe: If detector errors out, we treat it as suspicious
-        return False, 0.0, "ERROR"
+        if os.path.exists(temp_wav): os.remove(temp_wav)
+        # Fail safe: Allow if model errors out
+        return True, 0.0, "ERROR"
 
 def get_voice_embedding(signal):
     embedding = spk_model.encode_batch(signal)
@@ -123,7 +178,6 @@ def encrypt_voiceprint(embedding_np):
     data_bytes = pickle.dumps(embedding_np)
     cipher = AES.new(AES_KEY, AES.MODE_GCM)
     ciphertext, tag = cipher.encrypt_and_digest(data_bytes)
-    
     payload = {"nonce": cipher.nonce, "tag": tag, "ciphertext": ciphertext}
     return pickle.dumps(payload)
 

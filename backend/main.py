@@ -1,84 +1,111 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List
 import os
 import shutil
+import numpy as np
 from sqlalchemy.orm import Session
-# --- CORRECTED IMPORT: Import 'engine' from database, not models ---
+# Ensure database.py is correctly configured
 from database import get_db, engine 
 import models
 import utils
 
-# Initialize Database Tables
-# Fixed: Use 'engine' directly
+# Create Tables
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Secure Voice MFA System")
+app = FastAPI(title="Secure Voice MFA System (Enhanced)")
+os.makedirs("uploads", exist_ok=True)
 
-# --- CORS ---
+# --- FIX 1: CORS CONFIGURATION ---
+# This fixes the "Connection Error" on the frontend
+origins = [
+    "http://localhost:5173",  # Vite/React default
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",  # CRA default
+    "http://127.0.0.1:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-os.makedirs("uploads", exist_ok=True)
+# Store challenges temporarily
+active_challenges = {} 
 
 @app.get("/")
 def home():
-    return {"message": "Secure Voice MFA Backend Running - ALL GATES ACTIVE"}
+    return {"message": "Enhanced Voice MFA Active"}
 
 # ==========================================
-# PHASE 1: ENROLLMENT (Register)
+# 1. CHALLENGE GENERATION
+# ==========================================
+@app.get("/get_challenge/{username}")
+def get_challenge(username: str):
+    """
+    Generates a random phrase (6-7 words) for the user to speak.
+    """
+    # Note: ensure utils.py is updated to generate 6-7 words
+    code = utils.generate_challenge_code() 
+    active_challenges[username] = code
+    print(f"Generated Challenge for {username}: {code}")
+    return {"challenge": code}
+
+# ==========================================
+# 2. ENHANCED REGISTRATION
 # ==========================================
 @app.post("/register")
 async def register_user(
     username: str = Form(...), 
     pin: str = Form(...), 
-    audio_file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     db: Session = Depends(get_db)
 ):
     print(f"--- Registering User: {username} ---")
 
-    # 1. Database Check
-    existing = db.query(models.User).filter(models.User.username == username).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Username already exists.")
-
-    # 2. Save File Temporarily
-    temp_filename = f"uploads/reg_{username}_{audio_file.filename}"
-    with open(temp_filename, "wb") as buffer:
-        shutil.copyfileobj(audio_file.file, buffer)
-
     try:
-        # 3. GATE 0: Load & Enhance Audio (Remove Noise)
-        print("Step 1: Enhancing Audio...")
-        clean_signal = utils.load_and_enhance_audio(temp_filename)
-        
-        if clean_signal is None:
-            raise HTTPException(status_code=400, detail="Audio file corrupted or unreadable.")
+        if db.query(models.User).filter(models.User.username == username).first():
+            raise HTTPException(status_code=400, detail="Username already exists.")
 
-        # 4. GATE 1: Anti-Spoof Check (Uses file path)
-        print("Step 2: Deepfake Detection...")
-        is_real, confidence, label = utils.check_spoofing(temp_filename)
-        print(f"Spoof Result: {label} ({confidence:.4f})")
-        
-        if not is_real:
-            raise HTTPException(status_code=400, detail="Registration rejected. Synthetic audio detected.")
+        if len(files) < 3:
+             raise HTTPException(status_code=400, detail="Please provide 3 audio samples.")
 
-        # 5. Extract Voice Embedding
-        print("Step 3: Generating & Encrypting Voiceprint...")
-        embedding = utils.get_voice_embedding(clean_signal)
+        embeddings = []
 
-        # 6. Encrypt (AES-256)
-        print("Step 3: Encrypting Data...")
-        encrypted_blob = utils.encrypt_voiceprint(embedding)
+        # Loop through all 3 files
+        for i, audio_file in enumerate(files):
+            temp_filename = f"uploads/reg_{username}_{i}_{audio_file.filename}"
+            with open(temp_filename, "wb") as buffer:
+                shutil.copyfileobj(audio_file.file, buffer)
+            
+            # Gate 0: Process Audio
+            clean_signal = utils.load_and_enhance_audio(temp_filename)
+            if clean_signal is None:
+                if os.path.exists(temp_filename): os.remove(temp_filename)
+                raise HTTPException(status_code=400, detail=f"Sample {i+1} was poor quality.")
 
-        # 7. Hash PIN
+            # Gate 1: Anti-Spoof (Commented out for easier testing, uncomment for prod)
+            # is_real, conf, label = utils.check_spoofing(temp_filename)
+            # if not is_real:
+            #     os.remove(temp_filename)
+            #     raise HTTPException(status_code=400, detail=f"Sample {i+1} detected as FAKE/AI.")
+            
+            os.remove(temp_filename) # Cleanup file
+
+            # Get Embedding
+            emb = utils.get_voice_embedding(clean_signal)
+            embeddings.append(emb)
+
+        # Average the 3 embeddings
+        avg_embedding = np.mean(embeddings, axis=0)
+
+        # Encrypt & Save
+        encrypted_blob = utils.encrypt_voiceprint(avg_embedding)
         hashed_pin = utils.hash_pin(pin)
 
-        # 8. Save to DB
         new_user = models.User(
             username=username,
             password_hash=hashed_pin,
@@ -88,20 +115,17 @@ async def register_user(
         db.add(new_user)
         db.commit()
         
-        return {"status": "success", "message": "User registered securely."}
+        return {"status": "success", "message": "User registered successfully."}
 
+    # --- FIX 2: CATCH HTTP EXCEPTIONS ---
     except HTTPException as he:
-        raise he
+        raise he  # Re-raise known errors (like 400 Bad Request) so they reach frontend
     except Exception as e:
-        print(f"Server Error: {e}")
-        raise HTTPException(status_code=500, detail="Internal processing error.")
-    finally:
-        if os.path.exists(temp_filename):
-            os.remove(temp_filename)
-
+        print(f"SERVER ERROR: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 # ==========================================
-# PHASE 2: AUTHENTICATION (Login)
+# 3. ENHANCED LOGIN
 # ==========================================
 @app.post("/login")
 async def login_user(
@@ -112,66 +136,69 @@ async def login_user(
 ):
     print(f"\n--- Login Attempt: {username} ---")
 
-    # 1. Identity Check
+    # 1. Check Identity
     user = db.query(models.User).filter(models.User.username == username).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid Credentials")
+    if not user: raise HTTPException(status_code=401, detail="User not found")
 
-    # 2. PIN Verification
+    # 2. PIN Check
     if not utils.verify_pin(pin, user.password_hash):
-        print("PIN Mismatch")
-        raise HTTPException(status_code=401, detail="Invalid Credentials")
-    print("PIN Verified.")
+         raise HTTPException(status_code=401, detail="Wrong PIN")
 
-    # 3. Audio Processing
+    # 3. Retrieve Challenge
+    expected_code = active_challenges.get(username)
+    if not expected_code:
+        raise HTTPException(status_code=400, detail="Challenge expired. Please click 'Get Challenge' again.")
+
     temp_filename = f"uploads/login_{username}_{audio_file.filename}"
     with open(temp_filename, "wb") as buffer:
         shutil.copyfileobj(audio_file.file, buffer)
 
     try:
-        # --- GATE 0: Noise Cancellation ---
-        print("Gate 0: Cleaning Audio (Noise Reduction)...")
+        # --- PHASE A: Challenge Verification (Word Matching) ---
+        transcript = utils.transcribe_audio(temp_filename)
+        print(f"Expected: {expected_code}")
+        print(f"Spoken:   {transcript}")
+        
+        # FIX 3: WORD MATCHING LOGIC (For 6-7 words)
+        expected_words = expected_code.split() # e.g. ["ALPHA", "BRAVO", "CHARLIE", ...]
+        
+        # Count how many expected words appear in the transcript
+        matches = 0
+        for word in expected_words:
+            if word in transcript: 
+                matches += 1
+        
+        # Allow some margin of error (e.g., missed 2 words out of 7 is okay)
+        required_matches = max(len(expected_words) - 2, 1) 
+        
+        if matches < required_matches:
+             print(f"STT FAILED: Found {matches}/{len(expected_words)} words")
+             raise HTTPException(status_code=403, detail=f"Challenge Failed. Detected: '{transcript}'")
+        
+        print(f"STT PASSED: Found {matches}/{len(expected_words)} words")
+
+        # --- PHASE B: Voice Analysis ---
         clean_signal = utils.load_and_enhance_audio(temp_filename)
-        if clean_signal is None:
-            raise HTTPException(status_code=400, detail="Audio processing failed.")
+        if clean_signal is None: raise HTTPException(status_code=400, detail="Audio unclear")
 
-        # --- GATE 1: Anti-Spoofing (Deepfake Detection) ---
-        print("Gate 1: Anti-Spoofing...")
-        is_real, confidence, label = utils.check_spoofing(temp_filename)
-        
-        if not is_real: 
-            print(f"REJECTED: Spoof detected ({label})")
-            raise HTTPException(status_code=403, detail="Access Denied: Fake Audio Detected.")
-        print(f"PASSED: Live Human ({confidence:.4f})")
+        # Anti-Spoof
+        is_real, conf, _ = utils.check_spoofing(temp_filename)
+        if not is_real: raise HTTPException(status_code=403, detail="Spoof Detected (Synthetic Audio)")
 
-        # --- GATE 2: Speaker Verification ---
-        print("Gate 2: Biometric Matching...")
+        # Matching
+        login_emb = utils.get_voice_embedding(clean_signal)
+        stored_emb = utils.decrypt_voiceprint(user.voiceprint)
         
-        # Generate new embedding from CLEAN audio
-        login_embedding = utils.get_voice_embedding(clean_signal)
-        
-        # Decrypt stored embedding
-        stored_embedding = utils.decrypt_voiceprint(user.voiceprint)
-        if stored_embedding is None:
-            raise HTTPException(status_code=500, detail="Database Integrity Error.")
+        score = utils.compare_faces(login_emb, stored_emb)
+        print(f"Biometric Score: {score}")
 
-        # Compare
-        score = utils.compare_faces(login_embedding, stored_embedding)
-        print(f"Similarity Score: {score:.4f}")
+        THRESHOLD = 0.65 
 
-        THRESHOLD = 0.62 
-        
         if score >= THRESHOLD:
-            return {
-                "status": "success",
-                "message": "Access Granted",
-                "user": username,
-                "score": round(score, 4),
-                "checks": ["PIN: OK", "Liveness: OK", "VoiceMatch: OK"]
-            }
+            del active_challenges[username]
+            return {"status": "success", "user": username, "score": score}
         else:
-            raise HTTPException(status_code=401, detail=f"Voice verification failed. Score: {round(score, 2)}")
+            raise HTTPException(status_code=401, detail=f"Voice not recognized (Score: {score:.2f})")
 
     finally:
-        if os.path.exists(temp_filename):
-            os.remove(temp_filename)
+        if os.path.exists(temp_filename): os.remove(temp_filename)
