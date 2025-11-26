@@ -1,9 +1,4 @@
 import os
-
-# --- CRITICAL FIX: FORCE DOWNLOADS TO E: DRIVE ---
-# This must run BEFORE any other imports to save space on C:
-os.environ["HF_HOME"] = "E:/hf_cache"
-os.environ["TORCH_HOME"] = "E:/hf_cache"
 # -------------------------------------------------
 
 import torchaudio
@@ -49,7 +44,8 @@ print("--- LOADING AI MODELS ---")
 print("1. Loading Speech Enhancer...")
 enhance_model = SpeechEnhancement.from_hparams(
     source="speechbrain/sepformer-dns4-16k-enhancement",
-    savedir="pretrained_models/enhancement"
+    savedir="pretrained_models/enhancement",
+    overrides=None
 )
 
 # 2. Anti-Spoofing (Gate 1)

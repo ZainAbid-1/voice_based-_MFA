@@ -159,7 +159,7 @@ async def login_user(
         score = utils.compare_faces(login_embedding, stored_embedding)
         print(f"Similarity Score: {score:.4f}")
 
-        THRESHOLD = 0.70 
+        THRESHOLD = 0.62 
         
         if score >= THRESHOLD:
             return {

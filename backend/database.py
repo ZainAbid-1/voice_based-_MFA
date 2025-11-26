@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 # Format: mysql+pymysql://username:password@host:port/databasename
 # REPLACE 'root' with your username
 # REPLACE 'YOUR_PASSWORD_HERE' with your actual MySQL password
-SQLALCHEMY_DATABASE_URL = "mysql+pymysql://root:shayan.raja32%40@localhost/voice_mfa"
+SQLALCHEMY_DATABASE_URL = "mysql+pymysql://root:zainA42342@localhost/voice_mfa"
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL
