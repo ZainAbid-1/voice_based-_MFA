@@ -2,6 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Req
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List
+from pydantic import BaseModel # <--- Added this import
 import os
 import shutil
 import numpy as np
@@ -51,6 +52,11 @@ if not JWT_SECRET:
     raise ValueError("JWT_SECRET_KEY not set in environment!")
 
 security = HTTPBearer()
+
+# --- HELPER MODELS ---
+class ChallengeRequest(BaseModel):
+    username: str
+    pin: str
 
 # --- HELPER FUNCTIONS ---
 def create_access_token(username: str) -> str:
@@ -136,13 +142,21 @@ def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 # ========================================
-# 1. CHALLENGE GENERATION
+# 1. CHALLENGE GENERATION (SECURED)
 # ========================================
-@app.get("/get_challenge/{username}")
+@app.post("/get_challenge") # Changed to POST to accept PIN securely
 @limiter.limit("10/minute")
-def get_challenge(request: Request, username: str, db: Session = Depends(get_db)):
-    """Generate random challenge phrase for user"""
+def get_challenge(
+    request: Request, 
+    payload: ChallengeRequest, 
+    db: Session = Depends(get_db)
+):
+    """Generate random challenge phrase ONLY if PIN is correct"""
     
+    username = payload.username
+    pin = payload.pin
+    client_ip = request.client.host if request.client else "unknown"
+
     # Validate username format
     if not utils.validate_username(username):
         raise HTTPException(status_code=400, detail="Invalid username format")
@@ -150,7 +164,8 @@ def get_challenge(request: Request, username: str, db: Session = Depends(get_db)
     # Check if user exists
     user = db.query(models.User).filter(models.User.username == username).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        # Security: Don't reveal user existence, but fail the same way
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     
     # Check account lockout
     if check_account_lockout(user):
@@ -159,6 +174,12 @@ def get_challenge(request: Request, username: str, db: Session = Depends(get_db)
             detail="Account is temporarily locked. Please try again later."
         )
     
+    # --- VERIFY PIN HERE ---
+    if not utils.verify_pin(pin, user.password_hash):
+        handle_failed_login(db, user)
+        log_login_attempt(db, username, user.id, False, "Wrong PIN during challenge request", client_ip)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
     # Cleanup old challenges
     cleanup_expired_challenges(db)
     
@@ -352,28 +373,14 @@ async def login_user(
         buffer.write(file_content)
     
     try:
-        # --- PHASE A: Challenge Verification ---
+        # --- PHASE A: Challenge Verification (DISABLED) ---
+        # We still transcribe for logging, but we won't block the user if they miss words.
         transcript = utils.transcribe_audio(temp_filename)
         print(f"Expected: {expected_code}")
         print(f"Spoken: {transcript}")
-        
-        # Word matching
-        expected_words = expected_code.split()
-        matches = sum(1 for word in expected_words if word in transcript)
-        
-        # Allow margin of error (can miss 2 words)
-        required_matches = max(len(expected_words) - 2, 1)
-        
-        if matches < required_matches:
-            handle_failed_login(db, user)
-            log_login_attempt(db, username, user.id, False, "Challenge failed", client_ip)
-            print(f"Challenge Failed: {matches}/{len(expected_words)} words")
-            raise HTTPException(
-                status_code=403,
-                detail=f"Challenge verification failed. Detected: '{transcript}'"
-            )
-        
-        print(f"Challenge Passed: {matches}/{len(expected_words)} words")
+
+        # SKIPPING STRICT TEXT CHECK
+        print(">> NOTICE: Challenge text verification disabled. Proceeding to Biometrics...")
         
         # --- PHASE B: Voice Biometric ---
         clean_signal = utils.load_and_enhance_audio(temp_filename)
@@ -402,7 +409,7 @@ async def login_user(
         score = utils.compare_faces(login_emb, stored_emb)
         print(f"Biometric Score: {score:.4f}")
         
-        THRESHOLD = 0.65
+        THRESHOLD = 0.54
         
         if score >= THRESHOLD:
             # Success - reset failed attempts

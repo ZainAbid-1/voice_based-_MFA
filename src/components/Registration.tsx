@@ -162,7 +162,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-md"
       >
-        <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-2xl p-8 border border-gray-100 dark:border-gray-700">
+        <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-2xl p-8 border border-gray-100 dark:border-gray-700 transition-colors duration-200">
           <div className="text-center mb-8">
             <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
               Create Account
@@ -301,11 +301,13 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                   </p>
                 </div>
 
-                <div className="bg-blue-50 dark:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 rounded-xl p-4">
-                  <p className="text-center text-sm text-gray-700 dark:text-gray-300">
+                {/* --- HIGH CONTRAST BOX FIX --- */}
+                <div className="bg-white dark:bg-gray-700 border-2 border-blue-100 dark:border-gray-600 rounded-xl p-6 shadow-inner transition-colors duration-200">
+                  <p className="text-xl font-bold text-center tracking-wide text-gray-800 dark:text-white">
                     "{REGISTRATION_PHRASES[voiceStep]}"
                   </p>
                 </div>
+                {/* --- END FIX --- */}
 
                 <div className="flex flex-col items-center gap-4">
                   {!audioBlobs[voiceStep] ? (

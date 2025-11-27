@@ -31,7 +31,7 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
-  // --- STEP 1: GET CHALLENGE ---
+  // --- STEP 1: GET CHALLENGE (UPDATED TO POST) ---
   const handleCredentialsSubmit = async () => {
     if (!username || !pin) return;
 
@@ -39,7 +39,12 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
     setIsProcessing(true);
 
     try {
-      const response = await axios.get(`http://127.0.0.1:8000/get_challenge/${username}`);
+      // CHANGED: Using POST with username AND pin
+      const response = await axios.post('http://127.0.0.1:8000/get_challenge', {
+        username: username,
+        pin: pin
+      });
+
       if (response.data && response.data.challenge) {
         setChallengeCode(response.data.challenge);
         setStep('voice');
@@ -48,7 +53,9 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
       }
     } catch (error: any) {
       console.error("Challenge Error:", error);
-      if (error.response?.status === 404) {
+      if (error.response?.status === 401) {
+        setErrorMessage("Invalid Username or PIN."); // Unified error message
+      } else if (error.response?.status === 404) {
         setErrorMessage("User not found.");
       } else if (error.code === "ERR_NETWORK") {
         setErrorMessage("Could not connect to server. Ensure backend is running.");
@@ -248,11 +255,15 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
                     Please speak these words clearly:
                   </p>
-                  <div className="bg-blue-50 dark:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 rounded-xl p-4">
-                    <p className="text-lg font-bold text-blue-900 dark:text-blue-100">
+                  
+                  {/* --- HIGH CONTRAST BOX --- */}
+                  <div className="bg-white dark:bg-gray-700 border-2 border-blue-100 dark:border-gray-600 rounded-xl p-6 shadow-inner transition-colors duration-200">
+                    <p className="text-xl md:text-2xl font-bold text-center tracking-wide text-gray-800 dark:text-white">
                       {challengeCode}
                     </p>
                   </div>
+                  {/* --- END HIGH CONTRAST BOX --- */}
+
                 </div>
 
                 <div className="flex flex-col items-center gap-4">
