@@ -1,481 +1,337 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import List
-from pydantic import BaseModel # <--- Added this import
+from typing import List, Optional
+from pydantic import BaseModel
 import os
 import shutil
 import numpy as np
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from sqlalchemy import func
+from datetime import datetime, timedelta, time
 from dotenv import load_dotenv
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 import jwt
 
-# Load environment variables
 load_dotenv()
-
 from database import get_db, engine
 import models
 import utils
 
-# Create tables
 models.Base.metadata.create_all(bind=engine)
 
-# Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="Secure Voice MFA System")
+app = FastAPI(title="Corporate Voice MFA & Task System")
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 os.makedirs("uploads", exist_ok=True)
 
-# --- CORS CONFIGURATION ---
-origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+# --- BUSINESS LOGIC CONFIG ---
+WORK_START_HOUR = 9
+WORK_END_HOUR = 17
+FINE_PER_HOUR_REMAINING = 50.0
 
+# --- JWT & SECURITY ---
+JWT_SECRET = os.getenv("JWT_SECRET_KEY", "dev_secret")
+JWT_ALGORITHM = "HS256"
+security = HTTPBearer()
+
+origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# --- JWT CONFIGURATION ---
-JWT_SECRET = os.getenv("JWT_SECRET_KEY")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-JWT_EXPIRATION_HOURS = int(os.getenv("JWT_EXPIRATION_HOURS", "24"))
+# --- MODELS ---
+class TaskCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    assigned_to_username: str
 
-if not JWT_SECRET:
-    raise ValueError("JWT_SECRET_KEY not set in environment!")
-
-security = HTTPBearer()
-
-# --- HELPER MODELS ---
 class ChallengeRequest(BaseModel):
     username: str
     pin: str
 
-# --- HELPER FUNCTIONS ---
-def create_access_token(username: str) -> str:
-    """Create JWT token"""
-    expiration = datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
+# --- HELPERS ---
+def create_access_token(username: str, role: str) -> str:
     payload = {
         "sub": username,
-        "exp": expiration,
-        "iat": datetime.utcnow()
+        "role": role,
+        "exp": datetime.utcnow() + timedelta(hours=24)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """Verify JWT token"""
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         username = payload.get("sub")
-        if not username:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return username
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        user = db.query(models.User).filter(models.User.username == username).first()
+        if not user: raise HTTPException(401, "User not found")
+        return user
+    except Exception: raise HTTPException(401, "Invalid token")
 
-def log_login_attempt(db: Session, username: str, user_id: int, success: bool, 
-                      failure_reason: str = None, ip_address: str = None):
-    """Log login attempt to database"""
-    attempt = models.LoginAttempt(
-        user_id=user_id,
-        username=username,
-        success=success,
-        failure_reason=failure_reason,
-        ip_address=ip_address
-    )
-    db.add(attempt)
-    db.commit()
-
-def check_account_lockout(user: models.User) -> bool:
-    """Check if account is locked"""
-    if user.locked_until:
-        if datetime.utcnow() < user.locked_until:
-            return True
-        else:
-            # Unlock account
-            user.locked_until = None
-            user.failed_attempts = 0
-    return False
-
-def handle_failed_login(db: Session, user: models.User):
-    """Handle failed login attempt"""
-    user.failed_attempts += 1
-    
-    max_attempts = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))
-    lockout_minutes = int(os.getenv("LOCKOUT_DURATION_MINUTES", "15"))
-    
-    if user.failed_attempts >= max_attempts:
-        user.locked_until = datetime.utcnow() + timedelta(minutes=lockout_minutes)
-        db.commit()
-        raise HTTPException(
-            status_code=429,
-            detail=f"Account locked due to multiple failed attempts. Try again after {lockout_minutes} minutes."
-        )
-    
-    db.commit()
-
-def cleanup_expired_challenges(db: Session):
-    """Remove expired challenges"""
-    db.query(models.Challenge).filter(
-        models.Challenge.expires_at < datetime.utcnow()
-    ).delete()
-    db.commit()
+def get_current_admin(user: models.User = Depends(get_current_user)):
+    if user.role != "admin": raise HTTPException(403, "Admin privileges required")
+    return user
 
 # --- ENDPOINTS ---
 
-@app.get("/")
-def home():
-    return {"message": "Secure Voice MFA System", "status": "active"}
-
-@app.get("/health")
-def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-# ========================================
-# 1. CHALLENGE GENERATION (SECURED)
-# ========================================
-@app.post("/get_challenge") # Changed to POST to accept PIN securely
-@limiter.limit("10/minute")
-def get_challenge(
-    request: Request, 
-    payload: ChallengeRequest, 
-    db: Session = Depends(get_db)
-):
-    """Generate random challenge phrase ONLY if PIN is correct"""
+@app.post("/get_challenge")
+def get_challenge(payload: ChallengeRequest, db: Session = Depends(get_db)):
+    print(f"--- Challenge Request for: {payload.username} ---")
+    user = db.query(models.User).filter(models.User.username == payload.username).first()
     
-    username = payload.username
-    pin = payload.pin
-    client_ip = request.client.host if request.client else "unknown"
-
-    # Validate username format
-    if not utils.validate_username(username):
-        raise HTTPException(status_code=400, detail="Invalid username format")
-    
-    # Check if user exists
-    user = db.query(models.User).filter(models.User.username == username).first()
     if not user:
-        # Security: Don't reveal user existence, but fail the same way
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        print("User not found.")
+        raise HTTPException(401, "Invalid credentials")
     
-    # Check account lockout
-    if check_account_lockout(user):
-        raise HTTPException(
-            status_code=429,
-            detail="Account is temporarily locked. Please try again later."
-        )
+    if not utils.verify_pin(payload.pin, user.password_hash):
+        print("PIN Verification Failed.")
+        raise HTTPException(401, "Invalid credentials")
     
-    # --- VERIFY PIN HERE ---
-    if not utils.verify_pin(pin, user.password_hash):
-        handle_failed_login(db, user)
-        log_login_attempt(db, username, user.id, False, "Wrong PIN during challenge request", client_ip)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    # Cleanup old challenges
-    cleanup_expired_challenges(db)
-    
-    # Generate new challenge
+    print("PIN Verified. Generating Challenge.")
     code = utils.generate_challenge_code()
-    expiration = utils.get_challenge_expiration()
-    
-    # Store in database
-    challenge = models.Challenge(
-        username=username,
-        challenge_code=code,
-        expires_at=expiration
-    )
+    challenge = models.Challenge(username=payload.username, challenge_code=code, expires_at=datetime.utcnow()+timedelta(seconds=300))
     db.add(challenge)
     db.commit()
-    
-    print(f"Generated Challenge for {username}: {code}")
-    return {
-        "challenge": code,
-        "expires_in_seconds": int(os.getenv("CHALLENGE_EXPIRATION_SECONDS", "300"))
-    }
+    return {"challenge": code}
 
-# ========================================
-# 2. REGISTRATION
-# ========================================
 @app.post("/register")
-@limiter.limit("3/hour")
 async def register_user(
-    request: Request,
     username: str = Form(...),
     pin: str = Form(...),
+    role: str = Form("employee"), 
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db)
 ):
-    """Register new user with voice samples"""
-    print(f"--- Registering User: {username} ---")
+    print(f"\n--- REGISTERING USER: {username} ({role}) ---")
     
+    if db.query(models.User).filter(models.User.username == username).first():
+        print("Registration Failed: Username already exists.")
+        raise HTTPException(400, "Username exists")
+
+    embeddings = []
     try:
-        # Input validation
-        if not utils.validate_username(username):
-            raise HTTPException(
-                status_code=400,
-                detail="Username must be 3-50 characters, alphanumeric and underscore only"
-            )
-        
-        if not utils.validate_pin(pin):
-            raise HTTPException(
-                status_code=400,
-                detail="PIN must be 4-12 characters, alphanumeric only"
-            )
-        
-        # Check if username exists
-        if db.query(models.User).filter(models.User.username == username).first():
-            raise HTTPException(status_code=400, detail="Username already exists")
-        
-        # Validate file count
-        if len(files) != 3:
-            raise HTTPException(status_code=400, detail="Exactly 3 audio samples required")
-        
-        embeddings = []
-        
-        # Process all 3 audio samples
-        for i, audio_file in enumerate(files):
-            # Validate file size
-            file_content = await audio_file.read()
-            if not utils.validate_audio_file(len(file_content)):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Sample {i+1} exceeds maximum file size"
-                )
+        for i, f in enumerate(files):
+            print(f"Processing sample {i+1}...")
+            temp = f"uploads/{f.filename}"
+            with open(temp, "wb") as b:
+                b.write(await f.read())
             
-            # Save temporarily
-            temp_filename = f"uploads/reg_{username}_{i}_{audio_file.filename}"
-            with open(temp_filename, "wb") as buffer:
-                buffer.write(file_content)
+            # GATE 0: Noise Reduction
+            print("Gate 0: Enhancing Audio...")
+            clean = utils.load_and_enhance_audio(temp)
+            if clean is None:
+                print(f"Sample {i+1} Failed: Audio bad/silent.")
+                raise HTTPException(400, "Audio processing failed")
             
-            try:
-                # Process audio
-                clean_signal = utils.load_and_enhance_audio(temp_filename)
-                if clean_signal is None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Sample {i+1} is poor quality or silent"
-                    )
-                
-                # Get embedding
-                emb = utils.get_voice_embedding(clean_signal)
-                embeddings.append(emb)
-                
-            finally:
-                # Always cleanup temp file
-                if os.path.exists(temp_filename):
-                    os.remove(temp_filename)
+            # GATE 1: Anti-Spoof (Even for registration)
+            print("Gate 1: Deepfake Detection...")
+            is_real, conf, label = utils.check_spoofing(temp)
+            print(f"Spoof Result: {label} (Confidence: {conf:.4f})")
+            
+            if not is_real:
+                print("Registration REJECTED: Synthetic audio detected.")
+                raise HTTPException(400, "Registration rejected. Synthetic audio detected.")
+
+            embeddings.append(utils.get_voice_embedding(clean))
+            os.remove(temp)
         
-        # Average embeddings
-        avg_embedding = np.mean(embeddings, axis=0)
+        print("Generating Voiceprint...")
+        avg_emb = np.mean(embeddings, axis=0)
+        enc_blob = utils.encrypt_voiceprint(avg_emb)
         
-        # Encrypt and save
-        encrypted_blob = utils.encrypt_voiceprint(avg_embedding)
-        hashed_pin = utils.hash_pin(pin)
-        
+        print("Hashing PIN and Saving to DB...")
         new_user = models.User(
             username=username,
-            password_hash=hashed_pin,
+            password_hash=utils.hash_pin(pin),
             salt="bcrypt",
-            voiceprint=encrypted_blob,
-            failed_attempts=0
+            voiceprint=enc_blob,
+            role=role
         )
-        
         db.add(new_user)
         db.commit()
-        
-        return {
-            "status": "success",
-            "message": "User registered successfully",
-            "username": username
-        }
-        
-    except HTTPException:
-        raise
+        print("Registration Successful!")
+        return {"status": "success", "message": "User registered"}
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        print(f"Registration Error: {e}")
-        raise HTTPException(status_code=500, detail="Registration failed")
+        print(f"Registration error: {e}")
+        raise HTTPException(500, "Internal Server Error")
 
-# ========================================
-# 3. LOGIN
-# ========================================
+# --- LOGIN (CLOCK IN) ---
 @app.post("/login")
-@limiter.limit("10/5minutes")
 async def login_user(
-    request: Request,
     username: str = Form(...),
     pin: str = Form(...),
     audio_file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    """Authenticate user with PIN and voice"""
-    print(f"\n--- Login Attempt: {username} ---")
+    print(f"\n--- LOGIN ATTEMPT: {username} ---")
     
-    # Get client IP
-    client_ip = request.client.host if request.client else "unknown"
-    
-    # Validate input
-    if not utils.validate_username(username):
-        raise HTTPException(status_code=400, detail="Invalid username format")
-    
-    # Check user exists
+    # 1. Basic Auth
     user = db.query(models.User).filter(models.User.username == username).first()
     if not user:
-        log_login_attempt(db, username, None, False, "User not found", client_ip)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    # Check account lockout
-    if check_account_lockout(user):
-        log_login_attempt(db, username, user.id, False, "Account locked", client_ip)
-        raise HTTPException(
-            status_code=429,
-            detail="Account locked. Please try again later."
-        )
-    
-    # Verify PIN
+        print("User not found in DB.")
+        raise HTTPException(401, "Invalid credentials")
+        
     if not utils.verify_pin(pin, user.password_hash):
-        handle_failed_login(db, user)
-        log_login_attempt(db, username, user.id, False, "Wrong PIN", client_ip)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        print("PIN Mismatch.")
+        raise HTTPException(401, "Invalid credentials")
     
-    # Get and validate challenge
-    cleanup_expired_challenges(db)
-    challenge = db.query(models.Challenge).filter(
-        models.Challenge.username == username,
-        models.Challenge.used == False,
-        models.Challenge.expires_at > datetime.utcnow()
-    ).order_by(models.Challenge.created_at.desc()).first()
-    
-    if not challenge:
-        raise HTTPException(
-            status_code=400,
-            detail="Challenge expired. Click 'Get Challenge' again."
-        )
-    
-    expected_code = challenge.challenge_code
-    
-    # Validate file size
-    file_content = await audio_file.read()
-    if not utils.validate_audio_file(len(file_content)):
-        raise HTTPException(status_code=400, detail="Audio file too large")
-    
-    # Save audio temporarily
-    temp_filename = f"uploads/login_{username}_{audio_file.filename}"
-    with open(temp_filename, "wb") as buffer:
-        buffer.write(file_content)
+    print("PIN Verified.")
+
+    # 2. Voice Auth
+    temp = f"uploads/login_{username}.webm"
+    with open(temp, "wb") as b:
+        b.write(await audio_file.read())
     
     try:
-        # --- PHASE A: Challenge Verification (DISABLED) ---
-        # We still transcribe for logging, but we won't block the user if they miss words.
-        transcript = utils.transcribe_audio(temp_filename)
-        print(f"Expected: {expected_code}")
-        print(f"Spoken: {transcript}")
-
-        # SKIPPING STRICT TEXT CHECK
-        print(">> NOTICE: Challenge text verification disabled. Proceeding to Biometrics...")
+        # GATE 0: Noise
+        print("Gate 0: Cleaning Audio (Noise Reduction)...")
+        clean = utils.load_and_enhance_audio(temp)
+        if clean is None: 
+            print("Gate 0 FAILED: Audio bad or silent.")
+            raise HTTPException(400, "Audio bad")
         
-        # --- PHASE B: Voice Biometric ---
-        clean_signal = utils.load_and_enhance_audio(temp_filename)
-        if clean_signal is None:
-            handle_failed_login(db, user)
-            log_login_attempt(db, username, user.id, False, "Audio unclear", client_ip)
-            raise HTTPException(status_code=400, detail="Audio quality insufficient")
+        # GATE 1: Anti-Spoof
+        print("Gate 1: Anti-Spoofing (Deepfake Check)...")
+        is_real, conf, label = utils.check_spoofing(temp)
         
-        # Anti-spoofing check
-        is_real, conf, label = utils.check_spoofing(temp_filename)
-        if not is_real:
-            handle_failed_login(db, user)
-            log_login_attempt(db, username, user.id, False, "Spoof detected", client_ip)
-            raise HTTPException(
-                status_code=403,
-                detail="Synthetic/replayed audio detected"
-            )
+        if not is_real: 
+            print(f"Gate 1 REJECTED: Spoof Detected! Label: {label}, Conf: {conf:.4f}")
+            raise HTTPException(403, "Spoof detected")
         
-        # Voice matching
-        login_emb = utils.get_voice_embedding(clean_signal)
+        print(f"Gate 1 PASSED: Audio is Real Human (Conf: {conf:.4f})")
+        
+        # GATE 2: Biometrics
+        print("Gate 2: Biometric Matching...")
+        login_emb = utils.get_voice_embedding(clean)
         stored_emb = utils.decrypt_voiceprint(user.voiceprint)
-        
-        if stored_emb is None:
-            raise HTTPException(status_code=500, detail="Failed to decrypt voiceprint")
-        
         score = utils.compare_faces(login_emb, stored_emb)
-        print(f"Biometric Score: {score:.4f}")
         
-        THRESHOLD = 0.54
+        print(f">> SIMILARITY SCORE: {score:.4f} <<")
         
-        if score >= THRESHOLD:
-            # Success - reset failed attempts
-            user.failed_attempts = 0
-            user.last_login = datetime.utcnow()
-            challenge.used = True
-            db.commit()
+        THRESHOLD = 0.50
+        if score < THRESHOLD:
+            print(f"Gate 2 FAILED: Score {score:.4f} is below threshold {THRESHOLD}")
+            raise HTTPException(401, "Voice mismatch")
+        
+        print("Gate 2 PASSED: Identity Verified.")
             
-            log_login_attempt(db, username, user.id, True, None, client_ip)
-            
-            # Create JWT token
-            token = create_access_token(username)
-            
-            return {
-                "status": "success",
-                "user": username,
-                "score": round(score, 4),
-                "token": token,
-                "expires_in_hours": JWT_EXPIRATION_HOURS
-            }
-        else:
-            handle_failed_login(db, user)
-            log_login_attempt(db, username, user.id, False, f"Voice mismatch (score: {score:.2f})", client_ip)
-            raise HTTPException(
-                status_code=401,
-                detail=f"Voice not recognized (confidence: {score:.2f})"
+        # 3. CLOCK IN LOGIC
+        today = datetime.utcnow().date()
+        attendance = db.query(models.Attendance).filter(
+            models.Attendance.user_id == user.id,
+            func.date(models.Attendance.date) == today,
+            models.Attendance.clock_out == None
+        ).first()
+        
+        if not attendance:
+            print("Clocking user in...")
+            attendance = models.Attendance(
+                user_id=user.id,
+                username=user.username,
+                clock_in=datetime.utcnow(),
+                status="Working"
             )
+            db.add(attendance)
+            db.commit()
+        else:
+            print("User already clocked in.")
             
+        token = create_access_token(user.username, user.role)
+        return {
+            "status": "success",
+            "role": user.role,
+            "token": token,
+            "clock_in_time": attendance.clock_in.isoformat()
+        }
     finally:
-        # Always cleanup
-        if os.path.exists(temp_filename):
-            os.remove(temp_filename)
+        if os.path.exists(temp): os.remove(temp)
 
-# ========================================
-# 4. PROTECTED ENDPOINT EXAMPLE
-# ========================================
-@app.get("/protected")
-def protected_route(username: str = Depends(verify_token)):
-    """Example protected endpoint requiring valid JWT"""
-    return {
-        "message": "Access granted",
-        "user": username
-    }
+# --- ADMIN ENDPOINTS ---
+@app.post("/admin/assign_task")
+def assign_task(task_data: TaskCreate, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    employee = db.query(models.User).filter(models.User.username == task_data.assigned_to_username).first()
+    if not employee: raise HTTPException(404, "Employee not found")
+    
+    task = models.Task(title=task_data.title, description=task_data.description, user_id=employee.id)
+    db.add(task)
+    db.commit()
+    print(f"Task '{task_data.title}' assigned to {employee.username} by {admin.username}")
+    return {"message": "Task assigned"}
 
-# ========================================
-# 5. USER INFO ENDPOINT
-# ========================================
-@app.get("/user/info")
-def get_user_info(
-    username: str = Depends(verify_token),
-    db: Session = Depends(get_db)
-):
-    """Get user information"""
-    user = db.query(models.User).filter(models.User.username == username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+@app.get("/admin/all_attendance")
+def get_all_attendance(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    return db.query(models.Attendance).all()
+
+# --- EMPLOYEE ENDPOINTS ---
+@app.get("/employee/tasks")
+def get_my_tasks(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return db.query(models.Task).filter(models.Task.user_id == user.id).all()
+
+@app.put("/employee/complete_task/{task_id}")
+def complete_task(task_id: int, user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task = db.query(models.Task).filter(models.Task.id == task_id, models.Task.user_id == user.id).first()
+    if not task: raise HTTPException(404, "Task not found")
+    
+    task.is_completed = True
+    task.completed_at = datetime.utcnow()
+    db.commit()
+    print(f"Task {task_id} completed by {user.username}")
+    return {"message": "Task marked complete"}
+
+# --- CLOCK OUT ---
+@app.post("/clock_out")
+def clock_out(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    print(f"\n--- CLOCK OUT ATTEMPT: {user.username} ---")
+    
+    attendance = db.query(models.Attendance).filter(
+        models.Attendance.user_id == user.id,
+        models.Attendance.clock_out == None
+    ).order_by(models.Attendance.clock_in.desc()).first()
+    
+    if not attendance: return {"message": "You are not clocked in."}
+    
+    now = datetime.utcnow()
+    attendance.clock_out = now
+    
+    pending_tasks = db.query(models.Task).filter(models.Task.user_id == user.id, models.Task.is_completed == False).count()
+    print(f"Pending Tasks: {pending_tasks}")
+    
+    today_5pm = now.replace(hour=WORK_END_HOUR, minute=0, second=0, microsecond=0)
+    is_early = now < today_5pm
+    
+    fine = 0.0
+    status = "Shift Completed"
+    
+    if not is_early:
+        status = "Shift Completed (On Time)"
+    elif is_early and pending_tasks == 0:
+        status = "Left Early (Authorized - Work Done)"
+    elif is_early and pending_tasks > 0:
+        hours_remaining = (today_5pm - now).total_seconds() / 3600
+        fine = round(hours_remaining * FINE_PER_HOUR_REMAINING, 2)
+        status = f"Left Early (Fined: Tasks Pending)"
+        print(f"FINE APPLIED: ${fine} (Left {hours_remaining:.2f} hours early with tasks)")
+    
+    attendance.status = status
+    attendance.fine_amount = fine
+    db.commit()
     
     return {
-        "username": user.username,
-        "created_at": user.created_at.isoformat() if user.created_at else None,
-        "last_login": user.last_login.isoformat() if user.last_login else None,
-        "is_active": user.is_active
+        "status": status,
+        "clock_out_time": now.isoformat(),
+        "pending_tasks": pending_tasks,
+        "fine_applied": f"${fine}",
+        "message": "You have been clocked out."
     }
 
 if __name__ == "__main__":
     import uvicorn
-    host = os.getenv("BACKEND_HOST", "127.0.0.1")
-    port = int(os.getenv("BACKEND_PORT", "8000"))
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host="127.0.0.1", port=8000)

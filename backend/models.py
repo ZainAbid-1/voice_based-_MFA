@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String, LargeBinary, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, LargeBinary, DateTime, ForeignKey, Boolean, Float, Text
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from database import Base
 
 class User(Base):
@@ -11,12 +12,17 @@ class User(Base):
     salt = Column(String(255), nullable=False)
     voiceprint = Column(LargeBinary(length=(2**32)-1), nullable=False)
     
+    # New Role Field (admin vs employee)
+    role = Column(String(20), default="employee") 
+    
     # Security fields
     failed_attempts = Column(Integer, default=0)
     locked_until = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     last_login = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
+
+    tasks = relationship("Task", back_populates="assigned_to")
 
 class LoginAttempt(Base):
     __tablename__ = "login_attempts"
@@ -38,3 +44,33 @@ class Challenge(Base):
     created_at = Column(DateTime, server_default=func.now(), index=True)
     expires_at = Column(DateTime, nullable=False)
     used = Column(Boolean, default=False)
+
+# --- ATTENDANCE TRACKING ---
+class Attendance(Base):
+    __tablename__ = "attendance"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    username = Column(String(50), nullable=False)
+    
+    date = Column(DateTime, default=func.now()) # To group by day
+    clock_in = Column(DateTime, default=func.now())
+    clock_out = Column(DateTime, nullable=True)
+    
+    status = Column(String(50), default="Working") # Working, Completed, Left Early (Authorized), Left Early (Fined)
+    fine_amount = Column(Float, default=0.0)
+
+# --- TASK MANAGEMENT ---
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    
+    assigned_at = Column(DateTime, server_default=func.now())
+    is_completed = Column(Boolean, default=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    assigned_to = relationship("User", back_populates="tasks")
