@@ -9,6 +9,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta, time
+from dateutil import parser # NEED TO INSTALL: pip install python-dateutil
 from dotenv import load_dotenv
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -29,7 +30,7 @@ os.makedirs("uploads", exist_ok=True)
 
 # --- BUSINESS LOGIC CONFIG ---
 WORK_START_HOUR = 9
-WORK_END_HOUR = 17
+WORK_END_HOUR = 17 # 5 PM
 FINE_PER_HOUR_REMAINING = 50.0
 
 # --- JWT & SECURITY ---
@@ -90,13 +91,9 @@ def get_challenge(payload: ChallengeRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.username == payload.username).first()
     
     if not user:
-        print(f"Result: USER NOT FOUND ❌")
-        print(f"{'='*60}\n")
         raise HTTPException(401, "Invalid credentials")
     
     if not utils.verify_pin(payload.pin, user.password_hash):
-        print(f"Result: PIN MISMATCH ❌")
-        print(f"{'='*60}\n")
         raise HTTPException(401, "Invalid credentials")
     
     code = utils.generate_challenge_code()
@@ -105,10 +102,6 @@ def get_challenge(payload: ChallengeRequest, db: Session = Depends(get_db)):
     db.commit()
     
     print(f"Challenge Generated: {code}")
-    print(f"Expires At: {challenge.expires_at}")
-    print(f"Result: SUCCESS ✅")
-    print(f"{'='*60}\n")
-    
     return {"challenge": code}
 
 @app.post("/register")
@@ -122,46 +115,40 @@ async def register_user(
     print(f"\n{'='*60}")
     print(f"📝 REGISTRATION REQUEST")
     print(f"{'='*60}")
-    print(f"Username: {username}")
-    print(f"Role: {role}")
     
     if db.query(models.User).filter(models.User.username == username).first():
-        print(f"Result: USERNAME EXISTS ❌")
-        print(f"{'='*60}\n")
         raise HTTPException(400, "Username exists")
 
-    embeddings = []
+    valid_embeddings = []
+    total_samples = len(files)
+
     try:
         for i, f in enumerate(files):
-            print(f"\nProcessing audio sample {i+1}/3...")
+            print(f"\nProcessing audio sample {i+1}/{total_samples}...")
             temp = f"uploads/{f.filename}"
             with open(temp, "wb") as b:
                 b.write(await f.read())
             
-            # --- FIXED AUDIO QUALITY CHECK ---
-            is_valid, snr, is_loud, is_multi, details = utils.check_audio_quality(temp)
-            
-            if not is_valid:
-                msg = "Quality issues detected"
-                if is_loud: msg = "Audio is too loud (clipping)"
-                elif is_multi: msg = "Multiple speakers detected"
-                elif snr < 10: msg = "Too much background noise"
-                
-                print(f"Audio Quality Check FAILED: {msg}")
-                raise HTTPException(400, f"Sample {i+1} rejected: {msg}")
+            utils.check_audio_quality(temp)
             
             clean = utils.load_and_enhance_audio(temp)
             if clean is None:
-                raise HTTPException(400, "Audio processing failed")
+                os.remove(temp)
+                continue
             
             is_real, conf, label = utils.check_spoofing(temp)
             if not is_real:
-                raise HTTPException(400, "Registration rejected. Synthetic audio detected.")
+                print(f"❌ Sample {i+1} rejected as FAKE/SPOOF")
+                os.remove(temp)
+                continue
 
-            embeddings.append(utils.get_voice_embedding(clean))
+            valid_embeddings.append(utils.get_voice_embedding(clean))
             os.remove(temp)
         
-        avg_emb = np.mean(embeddings, axis=0)
+        if len(valid_embeddings) < (total_samples / 2):
+             raise HTTPException(400, "Registration failed: Too many poor quality or suspicious audio samples.")
+
+        avg_emb = np.mean(valid_embeddings, axis=0)
         enc_blob = utils.encrypt_voiceprint(avg_emb)
         
         new_user = models.User(
@@ -174,15 +161,9 @@ async def register_user(
         db.add(new_user)
         db.commit()
         
-        print(f"\nResult: REGISTRATION SUCCESS ✅")
-        print(f"{'='*60}\n")
         return {"status": "success", "message": "User registered"}
     except Exception as e:
-        print(f"Registration error: {e}")
-        print(f"{'='*60}\n")
-        # Clean up temp file if error occurs
-        if 'temp' in locals() and os.path.exists(temp):
-            os.remove(temp)
+        if 'temp' in locals() and os.path.exists(temp): os.remove(temp)
         raise HTTPException(500, str(e))
 
 @app.post("/login")
@@ -190,6 +171,7 @@ async def login_user(
     username: str = Form(...),
     pin: str = Form(...),
     audio_file: UploadFile = File(...),
+    client_time: str = Form(...), # <--- NEW: Get time from user's PC
     db: Session = Depends(get_db)
 ):
     print(f"\n{'='*60}")
@@ -197,16 +179,18 @@ async def login_user(
     print(f"{'='*60}")
     print(f"Username: {username}")
     
+    # Parse Client Time for Clock In
+    try:
+        clock_in_time = parser.isoparse(client_time)
+        if clock_in_time.tzinfo is not None:
+            clock_in_time = clock_in_time.replace(tzinfo=None)
+        print(f"🕒 User Clock-In Time: {clock_in_time}")
+    except:
+        clock_in_time = datetime.now()
+    
     # 1. Basic Auth
     user = db.query(models.User).filter(models.User.username == username).first()
-    if not user:
-        print(f"Result: USER NOT FOUND ❌")
-        print(f"{'='*60}\n")
-        raise HTTPException(401, "Invalid credentials")
-        
-    if not utils.verify_pin(pin, user.password_hash):
-        print(f"Result: PIN MISMATCH ❌")
-        print(f"{'='*60}\n")
+    if not user or not utils.verify_pin(pin, user.password_hash):
         raise HTTPException(401, "Invalid credentials")
     
     # 2. Voice Auth
@@ -215,39 +199,29 @@ async def login_user(
         b.write(await audio_file.read())
     
     try:
-        # --- FIXED AUDIO QUALITY CHECK ---
-        is_valid, snr, is_loud, is_multi, details = utils.check_audio_quality(temp)
-
-        if not is_valid:
-            msg = "Poor audio quality"
-            if is_loud: msg = "Audio is too loud (clipping)"
-            elif is_multi: msg = "Multiple speakers detected"
-            elif snr < 10: msg = "Too much background noise"
-            
-            raise HTTPException(400, f"Audio quality issue: {msg}. Please find a quieter location.")
+        utils.check_audio_quality(temp)
         
         clean = utils.load_and_enhance_audio(temp)
-        if clean is None: 
-            raise HTTPException(400, "Audio processing failed")
+        if clean is None: raise HTTPException(400, "Audio processing failed")
         
         is_real, conf, label = utils.check_spoofing(temp)
-        if not is_real: 
-            raise HTTPException(403, "Spoof detected")
+        if not is_real: raise HTTPException(403, "Spoof detected")
         
         login_emb = utils.get_voice_embedding(clean)
         stored_emb = utils.decrypt_voiceprint(user.voiceprint)
         score = utils.compare_faces(login_emb, stored_emb)
         
         if score < 0.50:
-            print(f"Result: VOICE MISMATCH ❌")
-            print(f"{'='*60}\n")
             raise HTTPException(401, "Voice mismatch")
             
-        # 3. CLOCK IN LOGIC
-        today = datetime.utcnow().date()
+        # 3. CLOCK IN LOGIC (Using Client Time)
+        today_start = clock_in_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = clock_in_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+        
         attendance = db.query(models.Attendance).filter(
             models.Attendance.user_id == user.id,
-            func.date(models.Attendance.date) == today,
+            models.Attendance.date >= today_start,
+            models.Attendance.date <= today_end,
             models.Attendance.clock_out == None
         ).first()
         
@@ -255,17 +229,15 @@ async def login_user(
             attendance = models.Attendance(
                 user_id=user.id,
                 username=user.username,
-                clock_in=datetime.utcnow(),
+                date=clock_in_time,
+                clock_in=clock_in_time, # Using user's time
                 status="Working"
             )
             db.add(attendance)
             db.commit()
-            print(f"✅ User CLOCKED IN at {attendance.clock_in}")
+            print(f"✅ User CLOCKED IN at {attendance.clock_in} (Client Time)")
             
         token = create_access_token(user.username, user.role)
-        
-        print(f"\nResult: LOGIN SUCCESS ✅")
-        print(f"{'='*60}\n")
         
         return {
             "status": "success",
@@ -290,7 +262,6 @@ def get_all_tasks(admin: models.User = Depends(get_current_admin), db: Session =
 def assign_task(task_data: TaskCreate, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
     employee = db.query(models.User).filter(models.User.username == task_data.assigned_to_username).first()
     if not employee: raise HTTPException(404, "Employee not found")
-    
     task = models.Task(title=task_data.title, description=task_data.description, user_id=employee.id)
     db.add(task)
     db.commit()
@@ -300,15 +271,11 @@ def assign_task(task_data: TaskCreate, admin: models.User = Depends(get_current_
 def get_all_attendance(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
     return db.query(models.Attendance).all()
 
-# --- EMPLOYEE ENDPOINTS ---
 @app.get("/employee/history")
 def get_my_history(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     history = db.query(models.Attendance).filter(models.Attendance.user_id == user.id)\
         .order_by(models.Attendance.clock_in.desc()).limit(10).all()
-    return {
-        "username": user.username,
-        "history": history
-    }
+    return {"username": user.username, "history": history}
 
 @app.get("/employee/tasks")
 def get_my_tasks(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -318,32 +285,30 @@ def get_my_tasks(user: models.User = Depends(get_current_user), db: Session = De
 def complete_task(task_id: int, user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     task = db.query(models.Task).filter(models.Task.id == task_id, models.Task.user_id == user.id).first()
     if not task: raise HTTPException(404, "Task not found")
-    
     task.is_completed = True
     task.completed_at = datetime.utcnow()
     db.commit()
     return {"message": "Task marked complete"}
 
-# --- CHECK PENDING TASKS (NEW ENDPOINT) ---
+# --- CHECK PENDING TASKS ---
 @app.get("/check_pending_tasks")
 def check_pending_tasks(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Check if user has pending tasks before clock out"""
     pending_count = db.query(models.Task).filter(
         models.Task.user_id == user.id,
         models.Task.is_completed == False
     ).count()
     
-    now = datetime.utcnow()
+    # NOTE: This endpoint still uses Server time for the preview. 
+    # The actual clock-out call will use client time.
+    now = datetime.now() 
     today_5pm = now.replace(hour=WORK_END_HOUR, minute=0, second=0, microsecond=0)
     is_early = now < today_5pm
     
     will_be_fined = is_early and pending_count > 0
-    
+    estimated_fine = 0.0
     if will_be_fined:
         hours_remaining = (today_5pm - now).total_seconds() / 3600
         estimated_fine = round(hours_remaining * FINE_PER_HOUR_REMAINING, 2)
-    else:
-        estimated_fine = 0.0
     
     return {
         "pending_tasks": pending_count,
@@ -357,6 +322,7 @@ def check_pending_tasks(user: models.User = Depends(get_current_user), db: Sessi
 @app.post("/clock_out")
 async def clock_out(
     audio_file: UploadFile = File(...),
+    client_time: str = Form(...), # <--- NEW: Get time from user's PC
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -365,61 +331,56 @@ async def clock_out(
     print(f"{'='*60}")
     print(f"Username: {user.username}")
     
+    # Parse Client Time
+    try:
+        clock_out_time = parser.isoparse(client_time)
+        if clock_out_time.tzinfo is not None:
+            clock_out_time = clock_out_time.replace(tzinfo=None)
+        print(f"🕒 User Clock-Out Time: {clock_out_time}")
+    except:
+        clock_out_time = datetime.now()
+
     attendance = db.query(models.Attendance).filter(
         models.Attendance.user_id == user.id,
         models.Attendance.clock_out == None
     ).order_by(models.Attendance.clock_in.desc()).first()
     
     if not attendance:
-        print(f"Result: NOT CLOCKED IN ❌")
-        print(f"{'='*60}\n")
         return {"message": "You are not clocked in."}
     
-    # Voice verification for clock out
+    # Voice verification
     temp = f"uploads/clockout_{user.username}.webm"
     with open(temp, "wb") as b:
         b.write(await audio_file.read())
     
     try:
-        # --- FIXED AUDIO QUALITY CHECK ---
-        is_valid, snr, is_loud, is_multi, details = utils.check_audio_quality(temp)
-        
-        if not is_valid:
-            msg = "Poor audio quality"
-            if is_loud: msg = "Audio is too loud (clipping)"
-            elif is_multi: msg = "Multiple speakers detected"
-            elif snr < 10: msg = "Too much background noise"
-
-            raise HTTPException(400, f"Audio quality issue: {msg}. Please find a quieter location.")
-        
+        utils.check_audio_quality(temp)
         clean = utils.load_and_enhance_audio(temp)
-        if clean is None:
-            raise HTTPException(400, "Audio processing failed")
+        if clean is None: raise HTTPException(400, "Audio processing failed")
         
         is_real, conf, label = utils.check_spoofing(temp)
-        if not is_real:
-            raise HTTPException(403, "Spoof detected")
+        if not is_real: raise HTTPException(403, "Spoof detected")
         
         logout_emb = utils.get_voice_embedding(clean)
         stored_emb = utils.decrypt_voiceprint(user.voiceprint)
         score = utils.compare_faces(logout_emb, stored_emb)
         
         if score < 0.50:
-            print(f"Result: VOICE VERIFICATION FAILED ❌")
-            print(f"{'='*60}\n")
             raise HTTPException(401, "Voice verification failed for clock out")
         
-        # Voice verified - proceed with clock out
-        now = datetime.utcnow()
-        attendance.clock_out = now
+        # --- FINE CALCULATION LOGIC (Using Client Time) ---
+        attendance.clock_out = clock_out_time
         
         pending_tasks = db.query(models.Task).filter(
             models.Task.user_id == user.id,
             models.Task.is_completed == False
         ).count()
         
-        today_5pm = now.replace(hour=WORK_END_HOUR, minute=0, second=0, microsecond=0)
-        is_early = now < today_5pm
+        # Determine 5 PM on the user's specific date
+        user_5pm = clock_out_time.replace(hour=WORK_END_HOUR, minute=0, second=0, microsecond=0)
+        
+        # Check if they left before 5 PM (User Time)
+        is_early = clock_out_time < user_5pm
         
         fine = 0.0
         status = "Shift Completed"
@@ -429,7 +390,10 @@ async def clock_out(
         elif is_early and pending_tasks == 0:
             status = "Left Early (Authorized - Work Done)"
         elif is_early and pending_tasks > 0:
-            hours_remaining = (today_5pm - now).total_seconds() / 3600
+            # Calculate difference in hours
+            diff = user_5pm - clock_out_time
+            hours_remaining = diff.total_seconds() / 3600
+            
             fine = round(hours_remaining * FINE_PER_HOUR_REMAINING, 2)
             status = f"Left Early (Fined)"
         
@@ -437,22 +401,19 @@ async def clock_out(
         attendance.fine_amount = fine
         db.commit()
         
-        print(f"Clock Out Time: {now}")
+        print(f"Clock Out Time: {clock_out_time}")
         print(f"Pending Tasks: {pending_tasks}")
         print(f"Fine Applied: ${fine}")
-        print(f"Status: {status}")
         print(f"Result: CLOCK OUT SUCCESS ✅")
-        print(f"{'='*60}\n")
         
         return {
             "status": status,
-            "clock_out_time": now.isoformat(),
+            "clock_out_time": clock_out_time.isoformat(),
             "fine_applied": f"${fine}",
             "pending_tasks": pending_tasks
         }
     finally:
-        if os.path.exists(temp):
-            os.remove(temp)
+        if os.path.exists(temp): os.remove(temp)
 
 if __name__ == "__main__":
     import uvicorn

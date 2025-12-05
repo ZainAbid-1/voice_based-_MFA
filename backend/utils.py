@@ -178,7 +178,8 @@ def check_audio_quality(file_path: str):
         db_level = 20 * np.log10(rms + 1e-10)
         print(f"📊 Volume Level: {db_level:.2f} dB")
         
-        is_too_loud = db_level > -1.0  # Only flag if hitting absolute max
+        # Adjusted threshold: Only flag if it's practically distorted (> -0.5 dB)
+        is_too_loud = db_level > -0.5 
         is_too_quiet = db_level < -60.0
         
         # 2. SNR Check
@@ -321,20 +322,36 @@ def load_and_enhance_audio(file_path: str):
         return None
 
 def check_spoofing(file_path: str):
-    """Anti-spoofing detection"""
+    """Anti-spoofing detection with Advanced Clipping Fix"""
     temp_wav = file_path + "_spoofcheck.wav"
     try:
         print(f"\n🛡️  Running Anti-Spoofing Analysis...")
         
+        # 1. Load Audio
         audio = pydub.AudioSegment.from_file(file_path)
         audio = audio.set_frame_rate(16000).set_channels(1)
+        
+        # --- FIX 1: LOW PASS FILTER ---
+        # Clipping creates high-frequency "jagged" noise. 
+        # A filter at 8kHz removes this digital noise but keeps human voice clear.
+        audio = audio.low_pass_filter(7500) 
+        
+        # --- FIX 2: HEADROOM NORMALIZATION ---
+        # Give it even more room (-4dB) to prevent touching the ceiling
+        target_dBFS = -4.0
+        change_in_dBFS = target_dBFS - audio.max_dBFS
+        audio = audio.apply_gain(change_in_dBFS)
+        
+        # 2. Export processed audio for the AI model
         audio.export(temp_wav, format="wav")
         
+        # 3. Run Analysis
         result = spoof_classifier(temp_wav)
         top_result = result[0]
         label = top_result['label'].upper()
         score = top_result['score']
         
+        # STRICT LOGIC: Must be REAL
         is_real = (label == "REAL")
         
         print(f"🔍 Spoofing Detection Result: {label}")
