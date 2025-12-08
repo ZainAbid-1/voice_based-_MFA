@@ -56,6 +56,15 @@ class ChallengeRequest(BaseModel):
     username: str
     pin: str
 
+class RegisterInitRequest(BaseModel):
+    username: str
+    pin: str
+    role: str = "employee"
+
+class UploadSampleRequest(BaseModel):
+    username: str
+    sample_index: int
+
 # --- HELPERS ---
 def create_access_token(username: str, role: str) -> str:
     payload = {
@@ -110,6 +119,174 @@ def get_challenge(payload: ChallengeRequest, db: Session = Depends(get_db)):
     print(f"{'='*60}\n")
     
     return {"challenge": code}
+
+@app.get("/check_username/{username}")
+def check_username(username: str, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if user:
+        raise HTTPException(409, "Username already taken")
+    return {"status": "available", "message": "Username is available"}
+
+@app.post("/register/init")
+def register_init(payload: RegisterInitRequest, db: Session = Depends(get_db)):
+    print(f"\n{'='*60}")
+    print(f"📝 REGISTRATION INIT")
+    print(f"{'='*60}")
+    print(f"Username: {payload.username}")
+    
+    if db.query(models.User).filter(models.User.username == payload.username).first():
+        raise HTTPException(400, "Username already exists")
+    
+    existing_pending = db.query(models.PendingRegistration).filter(
+        models.PendingRegistration.username == payload.username
+    ).first()
+    if existing_pending:
+        db.delete(existing_pending)
+        db.commit()
+    
+    pending = models.PendingRegistration(
+        username=payload.username,
+        password_hash=utils.hash_pin(payload.pin),
+        role=payload.role,
+        expires_at=datetime.utcnow() + timedelta(minutes=10)
+    )
+    db.add(pending)
+    db.commit()
+    
+    print(f"Result: INIT SUCCESS ✅")
+    print(f"{'='*60}\n")
+    
+    return {"status": "success", "message": "Registration initialized"}
+
+@app.post("/register/upload_sample")
+async def register_upload_sample(
+    username: str = Form(...),
+    sample_index: int = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    print(f"\n{'='*60}")
+    print(f"📤 UPLOAD SAMPLE {sample_index + 1}")
+    print(f"{'='*60}")
+    print(f"Username: {username}")
+    
+    pending = db.query(models.PendingRegistration).filter(
+        models.PendingRegistration.username == username
+    ).first()
+    
+    if not pending:
+        raise HTTPException(404, "Registration session not found. Please start registration again.")
+    
+    if datetime.utcnow() > pending.expires_at:
+        db.delete(pending)
+        db.commit()
+        raise HTTPException(410, "Registration session expired. Please start again.")
+    
+    if sample_index not in [0, 1, 2]:
+        raise HTTPException(400, "Invalid sample index. Must be 0, 1, or 2.")
+    
+    temp = f"uploads/pending_{username}_sample_{sample_index}.webm"
+    
+    try:
+        with open(temp, "wb") as b:
+            b.write(await file.read())
+        
+        is_valid, snr, is_loud, is_multi, details = utils.check_audio_quality(temp)
+        
+        if not is_valid:
+            msg = "Quality issues detected"
+            if is_loud: msg = "Audio is too loud (clipping)"
+            elif is_multi: msg = "Multiple speakers detected"
+            elif snr < 10: msg = "Too much background noise"
+            
+            print(f"Audio Quality Check FAILED: {msg}")
+            raise HTTPException(400, f"Sample {sample_index + 1} rejected: {msg}")
+        
+        clean = utils.load_and_enhance_audio(temp)
+        if clean is None:
+            raise HTTPException(400, "Audio processing failed")
+        
+        is_real, conf, label = utils.check_spoofing(temp)
+        if not is_real:
+            raise HTTPException(400, "Registration rejected. Synthetic audio detected.")
+        
+        embedding = utils.get_voice_embedding(clean)
+        embedding_blob = utils.encrypt_voiceprint(embedding)
+        
+        if sample_index == 0:
+            pending.sample_1_embedding = embedding_blob
+        elif sample_index == 1:
+            pending.sample_2_embedding = embedding_blob
+        elif sample_index == 2:
+            pending.sample_3_embedding = embedding_blob
+        
+        db.commit()
+        os.remove(temp)
+        
+        print(f"Result: SAMPLE {sample_index + 1} UPLOADED ✅")
+        print(f"{'='*60}\n")
+        
+        return {"status": "success", "message": f"Sample {sample_index + 1} uploaded successfully"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Upload error: {e}")
+        print(f"{'='*60}\n")
+        if os.path.exists(temp):
+            os.remove(temp)
+        raise HTTPException(500, str(e))
+
+@app.post("/register/finalize")
+def register_finalize(username: str = Form(...), db: Session = Depends(get_db)):
+    print(f"\n{'='*60}")
+    print(f"✅ REGISTRATION FINALIZE")
+    print(f"{'='*60}")
+    print(f"Username: {username}")
+    
+    pending = db.query(models.PendingRegistration).filter(
+        models.PendingRegistration.username == username
+    ).first()
+    
+    if not pending:
+        raise HTTPException(404, "Registration session not found")
+    
+    if datetime.utcnow() > pending.expires_at:
+        db.delete(pending)
+        db.commit()
+        raise HTTPException(410, "Registration session expired")
+    
+    if not all([pending.sample_1_embedding, pending.sample_2_embedding, pending.sample_3_embedding]):
+        raise HTTPException(400, "All 3 samples must be uploaded before finalizing")
+    
+    try:
+        emb1 = utils.decrypt_voiceprint(pending.sample_1_embedding)
+        emb2 = utils.decrypt_voiceprint(pending.sample_2_embedding)
+        emb3 = utils.decrypt_voiceprint(pending.sample_3_embedding)
+        
+        avg_emb = np.mean([emb1, emb2, emb3], axis=0)
+        final_blob = utils.encrypt_voiceprint(avg_emb)
+        
+        new_user = models.User(
+            username=pending.username,
+            password_hash=pending.password_hash,
+            salt="bcrypt",
+            voiceprint=final_blob,
+            role=pending.role
+        )
+        db.add(new_user)
+        db.delete(pending)
+        db.commit()
+        
+        print(f"Result: REGISTRATION COMPLETE ✅")
+        print(f"{'='*60}\n")
+        
+        return {"status": "success", "message": "Registration completed successfully"}
+    
+    except Exception as e:
+        print(f"Finalize error: {e}")
+        print(f"{'='*60}\n")
+        raise HTTPException(500, str(e))
 
 @app.post("/register")
 async def register_user(
@@ -299,6 +476,75 @@ def assign_task(task_data: TaskCreate, admin: models.User = Depends(get_current_
 @app.get("/admin/all_attendance")
 def get_all_attendance(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
     return db.query(models.Attendance).all()
+
+@app.get("/admin/dashboard_stats")
+def get_dashboard_stats(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    today = datetime.utcnow().date()
+    
+    active_employees = db.query(models.Attendance).filter(
+        models.Attendance.clock_out == None,
+        func.date(models.Attendance.date) == today
+    ).count()
+    
+    completed_shifts = db.query(models.Attendance).filter(
+        func.date(models.Attendance.date) == today,
+        models.Attendance.clock_out != None
+    ).count()
+    
+    total_tasks = db.query(models.Task).count()
+    completed_tasks = db.query(models.Task).filter(models.Task.is_completed == True).count()
+    efficiency = round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 2)
+    
+    attendance_graph = []
+    for i in range(7):
+        day = today - timedelta(days=6-i)
+        present = db.query(models.Attendance).filter(func.date(models.Attendance.date) == day).count()
+        late_records = db.query(models.Attendance).filter(
+            func.date(models.Attendance.date) == day,
+            func.extract('hour', models.Attendance.clock_in) > WORK_START_HOUR
+        ).count()
+        attendance_graph.append({
+            "date": day.isoformat(),
+            "present_count": present,
+            "late_count": late_records
+        })
+    
+    employees = db.query(models.User).filter(models.User.role != "admin").all()
+    employee_list = []
+    
+    for emp in employees:
+        today_attendance = db.query(models.Attendance).filter(
+            models.Attendance.user_id == emp.id,
+            func.date(models.Attendance.date) == today,
+            models.Attendance.clock_out == None
+        ).first()
+        
+        is_working = today_attendance is not None
+        clock_in_time = today_attendance.clock_in.isoformat() if today_attendance else None
+        
+        total_tasks = db.query(models.Task).filter(models.Task.user_id == emp.id).count()
+        completed = db.query(models.Task).filter(
+            models.Task.user_id == emp.id,
+            models.Task.is_completed == True
+        ).count()
+        
+        employee_list.append({
+            "id": emp.id,
+            "username": emp.username,
+            "status": "Working" if is_working else "Offline",
+            "clock_in_time": clock_in_time,
+            "tasks_completed": completed,
+            "tasks_total": total_tasks,
+            "tasks_progress": f"{completed}/{total_tasks}"
+        })
+    
+    return {
+        "active_employees": active_employees,
+        "completed_shifts": completed_shifts,
+        "efficiency": efficiency,
+        "attendance_graph": attendance_graph,
+        "employee_list": employee_list
+    }
 
 # --- EMPLOYEE ENDPOINTS ---
 @app.get("/employee/history")

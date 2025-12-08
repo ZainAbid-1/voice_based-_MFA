@@ -27,9 +27,11 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
   const [voiceStep, setVoiceStep] = useState(0);
   const [audioBlobs, setAudioBlobs] = useState<(Blob | null)[]>([null, null, null]);
   const [isRecording, setIsRecording] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<('idle' | 'uploading' | 'done' | 'error')[]>(['idle', 'idle', 'idle']);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [isCheckingUsername, setIsCheckingUsername] = useState(false);
 
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -37,10 +39,33 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
-  const handleNextStep = () => {
+  const handleNextStep = async () => {
     if (step === 1) {
       if (username && password && password === confirmPassword) {
-        setStep(2);
+        setIsCheckingUsername(true);
+        setErrorMessage('');
+        
+        try {
+          await axios.get(`http://127.0.0.1:8000/check_username/${username}`);
+          
+          await axios.post('http://127.0.0.1:8000/register/init', {
+            username,
+            pin: password,
+            role: 'employee'
+          });
+          
+          setStep(2);
+        } catch (error: any) {
+          if (error.response?.status === 409) {
+            setErrorMessage('Username already taken. Please choose another.');
+          } else if (error.response?.data?.detail) {
+            setErrorMessage(error.response.data.detail);
+          } else {
+            setErrorMessage('Failed to initialize registration. Please try again.');
+          }
+        } finally {
+          setIsCheckingUsername(false);
+        }
       }
     }
   };
@@ -56,7 +81,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
         if (event.data.size > 0) chunksRef.current.push(event.data);
       };
 
-      mediaRecorderRef.current.onstop = () => {
+      mediaRecorderRef.current.onstop = async () => {
         const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
         setAudioBlobs(prev => {
           const newBlobs = [...prev];
@@ -64,6 +89,8 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
           return newBlobs;
         });
         stream.getTracks().forEach(track => track.stop());
+        
+        await uploadSample(blob, voiceStep);
       };
 
       mediaRecorderRef.current.start();
@@ -81,11 +108,55 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
     }
   };
 
+  const uploadSample = async (blob: Blob, sampleIndex: number) => {
+    setUploadStatus(prev => {
+      const newStatus = [...prev];
+      newStatus[sampleIndex] = 'uploading';
+      return newStatus;
+    });
+    
+    const formData = new FormData();
+    formData.append('username', username);
+    formData.append('sample_index', sampleIndex.toString());
+    const file = new File([blob], `sample_${sampleIndex}.webm`, { type: 'audio/webm' });
+    formData.append('file', file);
+    
+    try {
+      await axios.post('http://127.0.0.1:8000/register/upload_sample', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      
+      setUploadStatus(prev => {
+        const newStatus = [...prev];
+        newStatus[sampleIndex] = 'done';
+        return newStatus;
+      });
+    } catch (error: any) {
+      console.error(`Sample ${sampleIndex + 1} upload failed:`, error);
+      setUploadStatus(prev => {
+        const newStatus = [...prev];
+        newStatus[sampleIndex] = 'error';
+        return newStatus;
+      });
+      
+      if (error.response?.data?.detail) {
+        setErrorMessage(error.response.data.detail);
+      } else {
+        setErrorMessage(`Failed to upload sample ${sampleIndex + 1}. Please try again.`);
+      }
+    }
+  };
+
   const deleteCurrentSample = () => {
     setAudioBlobs(prev => {
       const newBlobs = [...prev];
       newBlobs[voiceStep] = null;
       return newBlobs;
+    });
+    setUploadStatus(prev => {
+      const newStatus = [...prev];
+      newStatus[voiceStep] = 'idle';
+      return newStatus;
     });
   };
 
@@ -102,8 +173,8 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
   };
 
   const handleFinalSubmit = async () => {
-    if (audioBlobs.some(blob => blob === null)) {
-      setErrorMessage("Please record all 3 samples.");
+    if (uploadStatus.some(status => status !== 'done')) {
+      setErrorMessage("Please wait for all samples to finish uploading.");
       return;
     }
 
@@ -112,17 +183,9 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
 
     const formData = new FormData();
     formData.append('username', username);
-    formData.append('pin', password);
-
-    audioBlobs.forEach((blob, index) => {
-      if (blob) {
-        const file = new File([blob], `sample_${index}.webm`, { type: "audio/webm" });
-        formData.append('files', file);
-      }
-    });
 
     try {
-      const response = await axios.post('http://127.0.0.1:8000/register', formData, {
+      const response = await axios.post('http://127.0.0.1:8000/register/finalize', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
 
@@ -130,7 +193,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
         setStep(3);
       }
     } catch (error: any) {
-      console.error("Registration failed", error);
+      console.error("Registration finalization failed", error);
       if (error.response?.data?.detail) {
         setErrorMessage(error.response.data.detail);
       } else {
@@ -275,10 +338,10 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
 
                 <button
                   onClick={handleNextStep}
-                  disabled={!username || !password || password !== confirmPassword}
+                  disabled={!username || !password || password !== confirmPassword || isCheckingUsername}
                   className="w-full py-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 disabled:from-gray-400 disabled:to-gray-500 text-white rounded-xl shadow-lg hover:shadow-xl transition-all disabled:cursor-not-allowed"
                 >
-                  Continue
+                  {isCheckingUsername ? 'Checking username...' : 'Continue'}
                 </button>
               </motion.div>
             )}
@@ -341,6 +404,12 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                   <p className="text-sm text-gray-600 dark:text-gray-400 text-center">
                     {isRecording ? (
                       <span className="font-medium text-red-600 dark:text-red-400">Recording...</span>
+                    ) : uploadStatus[voiceStep] === 'uploading' ? (
+                      <span className="font-medium text-blue-600 dark:text-blue-400">Uploading...</span>
+                    ) : uploadStatus[voiceStep] === 'done' ? (
+                      <span className="font-medium text-green-600 dark:text-green-400">✓ Uploaded</span>
+                    ) : uploadStatus[voiceStep] === 'error' ? (
+                      <span className="font-medium text-red-600 dark:text-red-400">Upload failed</span>
                     ) : (
                       <span>{audioBlobs[voiceStep] ? "Sample Captured" : "Click mic to record"}</span>
                     )}
@@ -368,10 +437,10 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                   ) : (
                     <button
                       onClick={handleFinalSubmit}
-                      disabled={audioBlobs.some(b => !b) || isSubmitting}
+                      disabled={uploadStatus.some(s => s !== 'done') || isSubmitting}
                       className="flex-1 py-3 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 disabled:from-gray-400 disabled:to-gray-500 text-white rounded-xl shadow-lg hover:shadow-xl transition-all disabled:cursor-not-allowed"
                     >
-                      {isSubmitting ? "Creating Profile..." : "Complete Registration"}
+                      {isSubmitting ? "Finalizing..." : "Complete Registration"}
                     </button>
                   )}
                 </div>

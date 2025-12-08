@@ -120,11 +120,23 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
       });
 
       if (response.status === 200) {
-        // Store token if needed
         if (response.data.token) {
-          localStorage.setItem('auth_token', response.data.token);
+          localStorage.setItem('authToken', response.data.token);
         }
-        navigate('/auth-success');
+        if (response.data.role) {
+          localStorage.setItem('userRole', response.data.role);
+        }
+        localStorage.setItem('username', username);
+        
+        if (response.data.role === 'admin') {
+          navigate('/admin');
+        } else {
+          navigate('/dashboard', { 
+            state: { 
+              clock_in_time: response.data.clock_in_time 
+            } 
+          });
+        }
       }
     } catch (error: any) {
       console.error("Login failed", error);

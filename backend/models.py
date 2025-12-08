@@ -74,3 +74,18 @@ class Task(Base):
     completed_at = Column(DateTime, nullable=True)
 
     assigned_to = relationship("User", back_populates="tasks")
+
+class PendingRegistration(Base):
+    __tablename__ = "pending_registrations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(20), default="employee")
+    
+    sample_1_embedding = Column(LargeBinary, nullable=True)
+    sample_2_embedding = Column(LargeBinary, nullable=True)
+    sample_3_embedding = Column(LargeBinary, nullable=True)
+    
+    created_at = Column(DateTime, server_default=func.now())
+    expires_at = Column(DateTime, nullable=False)
