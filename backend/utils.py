@@ -285,7 +285,7 @@ def validate_audio_file(file_size: int) -> bool:
     return file_size <= max_size_bytes
 
 def load_and_enhance_audio(file_path: str):
-    """Enhanced audio processing with quality checks"""
+    """Enhanced audio processing with SAFE normalization"""
     try:
         if not os.path.exists(file_path):
             print("❌ Audio file not found")
@@ -296,24 +296,35 @@ def load_and_enhance_audio(file_path: str):
             print("❌ Audio file too large")
             return None
         
-        # Load and normalize
+        # 1. Load Audio
         audio = pydub.AudioSegment.from_file(file_path)
-        audio = audio.set_frame_rate(16000).set_channels(1)
-        audio = effects.normalize(audio)
         
+        # --- FIX: SAFE NORMALIZATION (-3.0 dB) ---
+        # Instead of maxing out to 0dB (which causes clipping), 
+        # we target -3dB to leave headroom for processing.
+        target_dBFS = -3.0
+        change_in_dBFS = target_dBFS - audio.max_dBFS
+        audio = audio.apply_gain(change_in_dBFS)
+        # -----------------------------------------
+
+        # 2. Standardize Format
+        audio = audio.set_frame_rate(16000).set_channels(1)
+        
+        # 3. Convert to Numpy
         samples = np.array(audio.get_array_of_samples()).astype(np.float32)
         samples = samples / 32768.0
         
+        # Check for silence
         if np.max(np.abs(samples)) < 0.01:
             print("❌ Audio is silent")
             return None
         
-        # Enhance audio
+        # 4. Enhance audio (Noise Cancellation)
         signal_tensor = torch.from_numpy(samples).unsqueeze(0)
         est_sources = enhance_model.separate_batch(signal_tensor)
         clean_signal = est_sources[:, :, 0]
         
-        print("✅ Audio enhancement complete")
+        print("✅ Audio enhancement complete (Safe Norm Applied)")
         return clean_signal
         
     except Exception as e:
