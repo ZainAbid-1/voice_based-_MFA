@@ -156,7 +156,7 @@ export default function AdminDashboard({ darkMode, setDarkMode }: AdminDashboard
   ];
 
   const attendanceData = stats.attendance_graph.map(item => ({
-    date: new Date(item.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+    date: new Date(item.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
     Present: item.present_count,
     Late: item.late_count
   }));
@@ -457,7 +457,7 @@ export default function AdminDashboard({ darkMode, setDarkMode }: AdminDashboard
                             <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
                               <Clock className="w-4 h-4" />
                               <span className="text-sm">
-                                {new Date(employee.clock_in_time).toLocaleTimeString('en-US', { 
+                                {new Date(employee.clock_in_time).toLocaleTimeString(undefined, { 
                                   hour: '2-digit', 
                                   minute: '2-digit' 
                                 })}

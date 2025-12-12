@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { User, Moon, Sun, LogOut, Clock, CheckCircle, Square, Mic, AlertCircle, RefreshCw } from 'lucide-react';
+import Waveform from './Waveform';
 import axios from 'axios';
 
 interface UserDashboardProps {
@@ -57,6 +58,27 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
 
     return () => clearInterval(timer);
   }, [token, navigate, location]);
+
+  useEffect(() => {
+    if (isClocked) {
+      window.history.pushState(null, '', window.location.href);
+    }
+
+    const handlePopState = (event: PopStateEvent) => {
+      if (isClocked) {
+        window.history.pushState(null, '', window.location.href);
+        setShowClockOutModal(true);
+        setErrorMessage('Please clock out before leaving this page.');
+        setTimeout(() => setErrorMessage(''), 5000);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [isClocked]);
 
   const fetchTasks = async () => {
     try {
@@ -154,6 +176,11 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
   };
 
   const handleLogout = () => {
+    if (isClocked) {
+      setErrorMessage('You must clock out before logging out.');
+      setTimeout(() => setErrorMessage(''), 5000);
+      return;
+    }
     localStorage.removeItem('authToken');
     localStorage.removeItem('username');
     localStorage.removeItem('clock_in_time');
@@ -165,12 +192,15 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
   };
 
   const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
+    if (!dateString) return '-';
+    const utcString = dateString.endsWith('Z') ? dateString : `${dateString}Z`;
+    const date = new Date(utcString);
     return date.toLocaleString('en-US', { 
       month: 'short', 
       day: 'numeric', 
       hour: '2-digit', 
-      minute: '2-digit' 
+      minute: '2-digit',
+      hour12: true 
     });
   };
 
@@ -215,6 +245,17 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
             </motion.button>
           </div>
         </div>
+
+        {errorMessage && !showClockOutModal && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl flex items-start gap-3 max-w-7xl mx-auto"
+          >
+            <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+            <p className="text-sm text-red-700 dark:text-red-300">{errorMessage}</p>
+          </motion.div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
           <motion.div
@@ -412,6 +453,12 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
                       <span>Click to record</span>
                     )}
                   </p>
+
+                  {isRecording && (
+                    <div className="flex justify-center">
+                      <Waveform isActive={isRecording} />
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex gap-3">
@@ -428,7 +475,7 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
                   <button
                     onClick={handleClockOut}
                     disabled={!audioBlob || isSubmittingClockOut}
-                    className="flex-1 py-3 bg-red-600 hover:bg-red-700 disabled:bg-gray-400 text-white rounded-xl transition-colors disabled:cursor-not-allowed"
+                    className="flex-1 py-3 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 disabled:from-gray-400 disabled:to-gray-500 text-white rounded-xl shadow-lg transition-all disabled:cursor-not-allowed"
                   >
                     {isSubmittingClockOut ? 'Verifying...' : 'Confirm Clock Out'}
                   </button>

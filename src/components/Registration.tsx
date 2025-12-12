@@ -429,7 +429,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                   {voiceStep < 2 ? (
                     <button
                       onClick={nextVoiceSample}
-                      disabled={!audioBlobs[voiceStep]}
+                      disabled={uploadStatus[voiceStep] !== 'done'}
                       className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white rounded-xl shadow-lg hover:shadow-xl transition-all disabled:cursor-not-allowed"
                     >
                       Next Sample

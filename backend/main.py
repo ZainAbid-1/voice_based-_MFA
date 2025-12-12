@@ -206,8 +206,10 @@ async def register_upload_sample(
         if clean is None:
             raise HTTPException(400, "Audio processing failed")
         
-        is_real, conf, label = utils.check_spoofing(temp)
+        is_real, conf, label = utils.check_spoofing(temp, is_clipped=is_loud)
         if not is_real:
+            if is_loud and label == "QUALITY_ISSUE":
+                raise HTTPException(400, "Audio is too loud or distorted. Please move further from the microphone and try again.")
             raise HTTPException(400, "Registration rejected. Synthetic audio detected.")
         
         embedding = utils.get_voice_embedding(clean)
@@ -331,8 +333,10 @@ async def register_user(
             if clean is None:
                 raise HTTPException(400, "Audio processing failed")
             
-            is_real, conf, label = utils.check_spoofing(temp)
+            is_real, conf, label = utils.check_spoofing(temp, is_clipped=is_loud)
             if not is_real:
+                if is_loud and label == "QUALITY_ISSUE":
+                    raise HTTPException(400, "Audio is too loud or distorted. Please move further from the microphone and try again.")
                 raise HTTPException(400, "Registration rejected. Synthetic audio detected.")
 
             embeddings.append(utils.get_voice_embedding(clean))
@@ -407,8 +411,10 @@ async def login_user(
         if clean is None: 
             raise HTTPException(400, "Audio processing failed")
         
-        is_real, conf, label = utils.check_spoofing(temp)
-        if not is_real: 
+        is_real, conf, label = utils.check_spoofing(temp, is_clipped=is_loud)
+        if not is_real:
+            if is_loud and label == "QUALITY_ISSUE":
+                raise HTTPException(400, "Audio is too loud or distorted. Please move further from the microphone and try again.")
             raise HTTPException(403, "Spoof detected")
         
         login_emb = utils.get_voice_embedding(clean)
@@ -468,7 +474,12 @@ def assign_task(task_data: TaskCreate, admin: models.User = Depends(get_current_
     employee = db.query(models.User).filter(models.User.username == task_data.assigned_to_username).first()
     if not employee: raise HTTPException(404, "Employee not found")
     
-    task = models.Task(title=task_data.title, description=task_data.description, user_id=employee.id)
+    task = models.Task(
+        title=task_data.title, 
+        description=task_data.description, 
+        user_id=employee.id,
+        assigned_at=datetime.utcnow()
+    )
     db.add(task)
     db.commit()
     return {"message": "Task assigned"}
@@ -642,8 +653,10 @@ async def clock_out(
         if clean is None:
             raise HTTPException(400, "Audio processing failed")
         
-        is_real, conf, label = utils.check_spoofing(temp)
+        is_real, conf, label = utils.check_spoofing(temp, is_clipped=is_loud)
         if not is_real:
+            if is_loud and label == "QUALITY_ISSUE":
+                raise HTTPException(400, "Audio is too loud or distorted. Please move further from the microphone and try again.")
             raise HTTPException(403, "Spoof detected")
         
         logout_emb = utils.get_voice_embedding(clean)

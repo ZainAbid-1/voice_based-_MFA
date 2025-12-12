@@ -331,8 +331,13 @@ def load_and_enhance_audio(file_path: str):
         print(f"❌ Error in audio processing: {e}")
         return None
 
-def check_spoofing(file_path: str):
-    """Anti-spoofing detection"""
+def check_spoofing(file_path: str, is_clipped: bool = False):
+    """Anti-spoofing detection with clipping detection"""
+    
+    if os.getenv("SKIP_SPOOF_CHECK") == "true":
+        print(f"⚠️  SPOOF CHECK BYPASSED (Development Mode)")
+        return True, 1.0, "REAL"
+    
     temp_wav = file_path + "_spoofcheck.wav"
     try:
         print(f"\n🛡️  Running Anti-Spoofing Analysis...")
@@ -354,7 +359,11 @@ def check_spoofing(file_path: str):
         if is_real:
             print(f"✅ Audio verified as GENUINE")
         else:
-            print(f"❌ SPOOFING DETECTED - Audio rejected")
+            if is_clipped:
+                print(f"⚠️  Spoof detected but likely due to clipping.")
+                label = "QUALITY_ISSUE"
+            else:
+                print(f"❌ SPOOFING DETECTED - Audio rejected")
         
         if os.path.exists(temp_wav):
             os.remove(temp_wav)

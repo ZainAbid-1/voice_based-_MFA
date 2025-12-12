@@ -1,5 +1,5 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, ReactNode } from 'react';
 import LandingPage from './components/LandingPage';
 import Registration from './components/Registration';
 import LoginPage from './components/LoginPage';
@@ -7,6 +7,20 @@ import AuthSuccess from './components/AuthSuccess';
 import AuthFailure from './components/AuthFailure';
 import UserDashboard from './components/UserDashboard';
 import AdminDashboard from './components/AdminDashboard';
+
+interface ProtectedRouteProps {
+  children: ReactNode;
+}
+
+function ProtectedRoute({ children }: ProtectedRouteProps) {
+  const token = localStorage.getItem('authToken');
+  
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
+  
+  return <>{children}</>;
+}
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
@@ -36,8 +50,16 @@ export default function App() {
           <Route path="/login" element={<LoginPage darkMode={darkMode} setDarkMode={setDarkMode} />} />
           <Route path="/auth-success" element={<AuthSuccess darkMode={darkMode} setDarkMode={setDarkMode} />} />
           <Route path="/auth-failure" element={<AuthFailure darkMode={darkMode} setDarkMode={setDarkMode} />} />
-          <Route path="/dashboard" element={<UserDashboard darkMode={darkMode} setDarkMode={setDarkMode} />} />
-          <Route path="/admin" element={<AdminDashboard darkMode={darkMode} setDarkMode={setDarkMode} />} />
+          <Route path="/dashboard" element={
+            <ProtectedRoute>
+              <UserDashboard darkMode={darkMode} setDarkMode={setDarkMode} />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin" element={
+            <ProtectedRoute>
+              <AdminDashboard darkMode={darkMode} setDarkMode={setDarkMode} />
+            </ProtectedRoute>
+          } />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Router>
