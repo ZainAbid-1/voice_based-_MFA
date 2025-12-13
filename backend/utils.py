@@ -29,6 +29,8 @@ def get_encryption_key():
     """Load AES key from environment variable"""
     key_hex = os.getenv("AES_ENCRYPTION_KEY")
     if not key_hex:
+        # Fallback for development if env var not set, or raise error
+        # Assuming you have it set based on your previous code
         raise ValueError("AES_ENCRYPTION_KEY not set in environment!")
     
     try:
@@ -300,26 +302,23 @@ def load_and_enhance_audio(file_path: str):
         audio = pydub.AudioSegment.from_file(file_path)
         
         # --- FIX: SAFE NORMALIZATION (-3.0 dB) ---
-        # Instead of maxing out to 0dB (which causes clipping), 
-        # we target -3dB to leave headroom for processing.
+        # Replaced effects.normalize(audio) with manual gain.
+        # This prevents the audio from hitting 0dB and causing clipping.
         target_dBFS = -3.0
         change_in_dBFS = target_dBFS - audio.max_dBFS
         audio = audio.apply_gain(change_in_dBFS)
         # -----------------------------------------
-
-        # 2. Standardize Format
+        
         audio = audio.set_frame_rate(16000).set_channels(1)
         
-        # 3. Convert to Numpy
         samples = np.array(audio.get_array_of_samples()).astype(np.float32)
         samples = samples / 32768.0
         
-        # Check for silence
         if np.max(np.abs(samples)) < 0.01:
             print("❌ Audio is silent")
             return None
         
-        # 4. Enhance audio (Noise Cancellation)
+        # Enhance audio
         signal_tensor = torch.from_numpy(samples).unsqueeze(0)
         est_sources = enhance_model.separate_batch(signal_tensor)
         clean_signal = est_sources[:, :, 0]
@@ -342,7 +341,17 @@ def check_spoofing(file_path: str, is_clipped: bool = False):
     try:
         print(f"\n🛡️  Running Anti-Spoofing Analysis...")
         
+        # Load audio
         audio = pydub.AudioSegment.from_file(file_path)
+        
+        # --- FIX: SAFE NORMALIZATION FOR SPOOF CHECK ---
+        # We also normalize the audio for the spoof checker so loud users
+        # don't get flagged as fake due to distortion.
+        target_dBFS = -3.0
+        change_in_dBFS = target_dBFS - audio.max_dBFS
+        audio = audio.apply_gain(change_in_dBFS)
+        # -----------------------------------------------
+
         audio = audio.set_frame_rate(16000).set_channels(1)
         audio.export(temp_wav, format="wav")
         
@@ -360,7 +369,8 @@ def check_spoofing(file_path: str, is_clipped: bool = False):
             print(f"✅ Audio verified as GENUINE")
         else:
             if is_clipped:
-                print(f"⚠️  Spoof detected but likely due to clipping.")
+                print(f"⚠️  Spoof detected but likely due to clipping. (Safe Norm attempted)")
+                # Sometimes severe clipping cannot be fixed by normalization if recorded that way
                 label = "QUALITY_ISSUE"
             else:
                 print(f"❌ SPOOFING DETECTED - Audio rejected")
