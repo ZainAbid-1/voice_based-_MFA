@@ -330,8 +330,58 @@ def load_and_enhance_audio(file_path: str):
         print(f"❌ Error in audio processing: {e}")
         return None
 
+def detect_playback_artifacts(file_path: str):
+    """Detect artifacts typical of recorded/replayed audio"""
+    try:
+        y, sr = librosa.load(file_path, sr=16000)
+        
+        # 1. Check for low-frequency rumble (speakers often introduce this)
+        low_freq_energy = np.sum(np.abs(librosa.stft(y, n_fft=2048)[:20, :]))
+        total_energy = np.sum(np.abs(librosa.stft(y, n_fft=2048)))
+        low_freq_ratio = low_freq_energy / (total_energy + 1e-10)
+        
+        # 2. Check for missing high frequencies (compression artifacts)
+        high_freq_energy = np.sum(np.abs(librosa.stft(y, n_fft=2048)[-100:, :]))
+        high_freq_ratio = high_freq_energy / (total_energy + 1e-10)
+        
+        # 3. Check spectral flatness (replayed audio tends to be flatter)
+        spectral_flatness = np.mean(librosa.feature.spectral_flatness(y=y))
+        
+        # Scoring system
+        playback_score = 0.0
+        reasons = []
+        
+        if low_freq_ratio > 0.15:
+            playback_score += 0.4
+            reasons.append(f"Excessive low-frequency energy ({low_freq_ratio:.3f})")
+        
+        if high_freq_ratio < 0.05:
+            playback_score += 0.3
+            reasons.append(f"Missing high frequencies ({high_freq_ratio:.3f})")
+        
+        if spectral_flatness > 0.3:
+            playback_score += 0.3
+            reasons.append(f"Abnormal spectral flatness ({spectral_flatness:.3f})")
+        
+        is_playback = playback_score >= 0.6
+        
+        print(f"🔬 Playback Artifact Analysis:")
+        print(f"   Low-freq ratio: {low_freq_ratio:.3f} (threshold: 0.15)")
+        print(f"   High-freq ratio: {high_freq_ratio:.3f} (threshold: 0.05)")
+        print(f"   Spectral flatness: {spectral_flatness:.3f} (threshold: 0.3)")
+        print(f"   Playback score: {playback_score:.2f}/1.0")
+        
+        if is_playback:
+            print(f"⚠️  Playback indicators: {', '.join(reasons)}")
+        
+        return is_playback, playback_score, reasons
+        
+    except Exception as e:
+        print(f"⚠️  Playback artifact detection failed: {e}")
+        return False, 0.0, []
+
 def check_spoofing(file_path: str, is_clipped: bool = False):
-    """Anti-spoofing detection with clipping detection"""
+    """Anti-spoofing detection with clipping detection and playback artifact analysis"""
     
     if os.getenv("SKIP_SPOOF_CHECK") == "true":
         print(f"⚠️  SPOOF CHECK BYPASSED (Development Mode)")
@@ -339,7 +389,7 @@ def check_spoofing(file_path: str, is_clipped: bool = False):
     
     temp_wav = file_path + "_spoofcheck.wav"
     try:
-        print(f"\n🛡️  Running Anti-Spoofing Analysis...")
+        print(f"\n🛡️  Running Multi-Layer Anti-Spoofing Analysis...")
         
         # Load audio
         audio = pydub.AudioSegment.from_file(file_path)
@@ -355,23 +405,35 @@ def check_spoofing(file_path: str, is_clipped: bool = False):
         audio = audio.set_frame_rate(16000).set_channels(1)
         audio.export(temp_wav, format="wav")
         
+        # Layer 1: AI-based deepfake detection
         result = spoof_classifier(temp_wav)
         top_result = result[0]
         label = top_result['label'].upper()
         score = top_result['score']
         
-        is_real = (label == "REAL")
+        print(f"🔍 AI Deepfake Detection: {label} (confidence: {score:.4f})")
         
-        print(f"🔍 Spoofing Detection Result: {label}")
-        print(f"📊 Confidence Score: {score:.4f}")
+        # Layer 2: Playback artifact detection
+        is_playback, playback_score, reasons = detect_playback_artifacts(temp_wav)
         
-        if is_real:
-            print(f"✅ Audio verified as GENUINE")
+        # Combined decision
+        is_real = (label == "REAL") and not is_playback
+        
+        if label == "REAL" and is_playback:
+            print(f"❌ AI classified as REAL, but playback artifacts detected!")
+            label = "PLAYBACK"
+        elif label != "REAL":
+            print(f"❌ AI detected synthetic audio")
         else:
-            if is_clipped:
-                print(f"⚠️  Spoof detected, If you are a human you should lower the peak of your voice")
-                # Sometimes severe clipping cannot be fixed by normalization if recorded that way
+            print(f"✅ Audio verified as GENUINE (passed both checks)")
+        
+        if not is_real:
+            if is_clipped and label == "PLAYBACK":
                 label = "QUALITY_ISSUE"
+                print(f"⚠️  Could be quality issue - please lower voice volume")
+            elif label == "PLAYBACK":
+                print(f"❌ PLAYBACK DETECTED - Audio rejected")
+                print(f"   Reasons: {', '.join(reasons) if reasons else 'Artifact analysis'}")
             else:
                 print(f"❌ SPOOFING DETECTED - Audio rejected")
         
