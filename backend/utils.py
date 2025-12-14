@@ -347,29 +347,29 @@ def detect_playback_artifacts(file_path: str):
         # 3. Check spectral flatness (replayed audio tends to be flatter)
         spectral_flatness = np.mean(librosa.feature.spectral_flatness(y=y))
         
-        # Scoring system
+        # Scoring system (more lenient thresholds)
         playback_score = 0.0
         reasons = []
         
-        if low_freq_ratio > 0.15:
-            playback_score += 0.4
+        if low_freq_ratio > 0.35:
+            playback_score += 0.5
             reasons.append(f"Excessive low-frequency energy ({low_freq_ratio:.3f})")
         
-        if high_freq_ratio < 0.05:
-            playback_score += 0.3
+        if high_freq_ratio < 0.005:
+            playback_score += 0.4
             reasons.append(f"Missing high frequencies ({high_freq_ratio:.3f})")
         
-        if spectral_flatness > 0.3:
-            playback_score += 0.3
+        if spectral_flatness > 0.5:
+            playback_score += 0.4
             reasons.append(f"Abnormal spectral flatness ({spectral_flatness:.3f})")
         
-        is_playback = playback_score >= 0.6
+        is_playback = playback_score >= 0.8
         
         print(f"🔬 Playback Artifact Analysis:")
-        print(f"   Low-freq ratio: {low_freq_ratio:.3f} (threshold: 0.15)")
-        print(f"   High-freq ratio: {high_freq_ratio:.3f} (threshold: 0.05)")
-        print(f"   Spectral flatness: {spectral_flatness:.3f} (threshold: 0.3)")
-        print(f"   Playback score: {playback_score:.2f}/1.0")
+        print(f"   Low-freq ratio: {low_freq_ratio:.3f} (threshold: 0.35)")
+        print(f"   High-freq ratio: {high_freq_ratio:.3f} (threshold: 0.005)")
+        print(f"   Spectral flatness: {spectral_flatness:.3f} (threshold: 0.5)")
+        print(f"   Playback score: {playback_score:.2f}/1.0 (reject at: 0.8)")
         
         if is_playback:
             print(f"⚠️  Playback indicators: {', '.join(reasons)}")
@@ -405,42 +405,39 @@ def check_spoofing(file_path: str, is_clipped: bool = False):
         audio = audio.set_frame_rate(16000).set_channels(1)
         audio.export(temp_wav, format="wav")
         
-        # Layer 1: AI-based deepfake detection
-        result = spoof_classifier(temp_wav)
-        top_result = result[0]
-        label = top_result['label'].upper()
-        score = top_result['score']
-        
-        print(f"🔍 AI Deepfake Detection: {label} (confidence: {score:.4f})")
-        
-        # Layer 2: Playback artifact detection
+        # Layer 1: Playback artifact detection (PRIMARY CHECK)
         is_playback, playback_score, reasons = detect_playback_artifacts(temp_wav)
         
-        # Combined decision
-        is_real = (label == "REAL") and not is_playback
+        # Layer 2: AI-based deepfake detection (SECONDARY - for logging only)
+        result = spoof_classifier(temp_wav)
+        top_result = result[0]
+        ai_label = top_result['label'].upper()
+        ai_score = top_result['score']
         
-        if label == "REAL" and is_playback:
-            print(f"❌ AI classified as REAL, but playback artifacts detected!")
+        print(f"🔍 AI Deepfake Detection: {ai_label} (confidence: {ai_score:.4f})")
+        
+        # DECISION LOGIC: Reject if playback artifacts detected OR AI detects fake with high confidence
+        is_real = not is_playback and not (ai_label == "FAKE" and ai_score > 0.95)
+        label = "REAL"
+        
+        if is_playback:
+            print(f"❌ PLAYBACK DETECTED - Audio rejected")
+            print(f"   Reasons: {', '.join(reasons)}")
             label = "PLAYBACK"
-        elif label != "REAL":
-            print(f"❌ AI detected synthetic audio")
-        else:
-            print(f"✅ Audio verified as GENUINE (passed both checks)")
-        
-        if not is_real:
-            if is_clipped and label == "PLAYBACK":
+            
+            if is_clipped:
                 label = "QUALITY_ISSUE"
                 print(f"⚠️  Could be quality issue - please lower voice volume")
-            elif label == "PLAYBACK":
-                print(f"❌ PLAYBACK DETECTED - Audio rejected")
-                print(f"   Reasons: {', '.join(reasons) if reasons else 'Artifact analysis'}")
-            else:
-                print(f"❌ SPOOFING DETECTED - Audio rejected")
+        elif ai_label == "FAKE" and ai_score > 0.95:
+            print(f"❌ AI DETECTED SYNTHETIC AUDIO - Audio rejected")
+            label = "SYNTHETIC"
+        else:
+            print(f"✅ Audio verified as GENUINE")
         
         if os.path.exists(temp_wav):
             os.remove(temp_wav)
         
-        return is_real, score, label
+        return is_real, playback_score, label
         
     except Exception as e:
         print(f"❌ Spoof Check Error: {e}")
