@@ -299,7 +299,13 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                     <input
                       type={showPassword ? "text" : "password"}
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (/^\d{0,4}$/.test(value)) {
+                          setPassword(value);
+                        }
+                      }}
+                      maxLength={4}
                       className="w-full pl-12 pr-12 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white"
                       placeholder="Create a PIN"
                     />
@@ -311,6 +317,9 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                       {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                     </button>
                   </div>
+                  <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                    PIN must be exactly 4 digits
+                  </p>
                 </div>
 
                 <div>
@@ -322,7 +331,13 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
                     <input
                       type={showConfirmPassword ? "text" : "password"}
                       value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (/^\d{0,4}$/.test(value)) {
+                          setConfirmPassword(value);
+                        }
+                      }}
+                      maxLength={4}
                       className="w-full pl-12 pr-12 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white"
                       placeholder="Repeat PIN"
                     />
@@ -338,7 +353,7 @@ export default function Registration({ darkMode, setDarkMode }: RegistrationProp
 
                 <button
                   onClick={handleNextStep}
-                  disabled={!username || !password || password !== confirmPassword || isCheckingUsername}
+                  disabled={!username || password.length !== 4 || password !== confirmPassword || isCheckingUsername}
                   className="w-full py-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 disabled:from-gray-400 disabled:to-gray-500 text-white rounded-xl shadow-lg hover:shadow-xl transition-all disabled:cursor-not-allowed"
                 >
                   {isCheckingUsername ? 'Checking username...' : 'Continue'}

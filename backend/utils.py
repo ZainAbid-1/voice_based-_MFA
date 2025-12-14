@@ -369,7 +369,7 @@ def check_spoofing(file_path: str, is_clipped: bool = False):
             print(f"✅ Audio verified as GENUINE")
         else:
             if is_clipped:
-                print(f"⚠️  Spoof detected but likely due to clipping. (Safe Norm attempted)")
+                print(f"⚠️  Spoof detected, If you are a human you should lower the peak of your voice")
                 # Sometimes severe clipping cannot be fixed by normalization if recorded that way
                 label = "QUALITY_ISSUE"
             else:

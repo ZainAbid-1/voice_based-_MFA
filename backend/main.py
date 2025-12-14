@@ -103,10 +103,46 @@ def get_challenge(payload: ChallengeRequest, db: Session = Depends(get_db)):
         print(f"{'='*60}\n")
         raise HTTPException(401, "Invalid credentials")
     
+    if user.locked_until and datetime.utcnow() < user.locked_until:
+        remaining_seconds = (user.locked_until - datetime.utcnow()).total_seconds()
+        locked_until_iso = user.locked_until.isoformat() + "Z"
+        print(f"Result: ACCOUNT LOCKED ❌")
+        print(f"{'='*60}\n")
+        raise HTTPException(403, f"Account locked. Try again after {int(remaining_seconds)} seconds.|{locked_until_iso}")
+    
+    if len(payload.pin) != 4 or not payload.pin.isdigit():
+        print(f"Result: INVALID PIN FORMAT ❌")
+        print(f"{'='*60}\n")
+        raise HTTPException(400, "PIN must be exactly 4 digits")
+    
     if not utils.verify_pin(payload.pin, user.password_hash):
-        print(f"Result: PIN MISMATCH ❌")
+        user.failed_attempts += 1
+        
+        if user.failed_attempts >= 5:
+            user.lockout_level += 1
+            if user.lockout_level == 1:
+                user.locked_until = datetime.utcnow() + timedelta(minutes=10)
+            elif user.lockout_level == 2:
+                user.locked_until = datetime.utcnow() + timedelta(minutes=30)
+            else:
+                user.locked_until = datetime.utcnow() + timedelta(hours=24)
+            user.failed_attempts = 0
+            db.commit()
+            
+            remaining_seconds = (user.locked_until - datetime.utcnow()).total_seconds()
+            locked_until_iso = user.locked_until.isoformat() + "Z"
+            print(f"Result: ACCOUNT LOCKED (Level {user.lockout_level}) ❌")
+            print(f"{'='*60}\n")
+            raise HTTPException(403, f"Too many failed attempts. Account locked for {int(remaining_seconds)} seconds.|{locked_until_iso}")
+        
+        db.commit()
+        print(f"Result: PIN MISMATCH ❌ (Attempt {user.failed_attempts}/5)")
         print(f"{'='*60}\n")
         raise HTTPException(401, "Invalid credentials")
+    
+    user.failed_attempts = 0
+    user.locked_until = None
+    db.commit()
     
     code = utils.generate_challenge_code()
     challenge = models.Challenge(username=payload.username, challenge_code=code, expires_at=datetime.utcnow()+timedelta(seconds=300))
@@ -136,6 +172,9 @@ def register_init(payload: RegisterInitRequest, db: Session = Depends(get_db)):
     
     if db.query(models.User).filter(models.User.username == payload.username).first():
         raise HTTPException(400, "Username already exists")
+    
+    if len(payload.pin) != 4 or not payload.pin.isdigit():
+        raise HTTPException(400, "PIN must be exactly 4 digits")
     
     existing_pending = db.query(models.PendingRegistration).filter(
         models.PendingRegistration.username == payload.username
@@ -308,6 +347,9 @@ async def register_user(
         print(f"Result: USERNAME EXISTS ❌")
         print(f"{'='*60}\n")
         raise HTTPException(400, "Username exists")
+    
+    if len(pin) != 4 or not pin.isdigit():
+        raise HTTPException(400, "PIN must be exactly 4 digits")
 
     embeddings = []
     try:
@@ -384,9 +426,41 @@ async def login_user(
         print(f"Result: USER NOT FOUND ❌")
         print(f"{'='*60}\n")
         raise HTTPException(401, "Invalid credentials")
+    
+    if user.locked_until and datetime.utcnow() < user.locked_until:
+        remaining_seconds = (user.locked_until - datetime.utcnow()).total_seconds()
+        locked_until_iso = user.locked_until.isoformat() + "Z"
+        print(f"Result: ACCOUNT LOCKED ❌")
+        print(f"{'='*60}\n")
+        raise HTTPException(403, f"Account locked. Try again after {int(remaining_seconds)} seconds.|{locked_until_iso}")
+    
+    if len(pin) != 4 or not pin.isdigit():
+        print(f"Result: INVALID PIN FORMAT ❌")
+        print(f"{'='*60}\n")
+        raise HTTPException(400, "PIN must be exactly 4 digits")
         
     if not utils.verify_pin(pin, user.password_hash):
-        print(f"Result: PIN MISMATCH ❌")
+        user.failed_attempts += 1
+        
+        if user.failed_attempts >= 5:
+            user.lockout_level += 1
+            if user.lockout_level == 1:
+                user.locked_until = datetime.utcnow() + timedelta(minutes=10)
+            elif user.lockout_level == 2:
+                user.locked_until = datetime.utcnow() + timedelta(minutes=30)
+            else:
+                user.locked_until = datetime.utcnow() + timedelta(hours=24)
+            user.failed_attempts = 0
+            db.commit()
+            
+            remaining_seconds = (user.locked_until - datetime.utcnow()).total_seconds()
+            locked_until_iso = user.locked_until.isoformat() + "Z"
+            print(f"Result: ACCOUNT LOCKED (Level {user.lockout_level}) ❌")
+            print(f"{'='*60}\n")
+            raise HTTPException(403, f"Too many failed attempts. Account locked for {int(remaining_seconds)} seconds.|{locked_until_iso}")
+        
+        db.commit()
+        print(f"Result: PIN MISMATCH ❌ (Attempt {user.failed_attempts}/5)")
         print(f"{'='*60}\n")
         raise HTTPException(401, "Invalid credentials")
     
@@ -414,7 +488,7 @@ async def login_user(
         is_real, conf, label = utils.check_spoofing(temp, is_clipped=is_loud)
         if not is_real:
             if is_loud and label == "QUALITY_ISSUE":
-                raise HTTPException(400, "Audio is too loud or distorted. Please move further from the microphone and try again.")
+                raise HTTPException(400, " Spoof detected, If you are a human you should lower the peak of your voice.")
             raise HTTPException(403, "Spoof detected")
         
         login_emb = utils.get_voice_embedding(clean)
@@ -426,6 +500,10 @@ async def login_user(
             print(f"{'='*60}\n")
             raise HTTPException(401, "Voice mismatch")
             
+        # Reset failed attempts on successful login
+        user.failed_attempts = 0
+        user.locked_until = None
+        
         # 3. CLOCK IN LOGIC
         today = datetime.utcnow().date()
         attendance = db.query(models.Attendance).filter(
@@ -531,7 +609,23 @@ def get_dashboard_stats(admin: models.User = Depends(get_current_admin), db: Ses
         ).first()
         
         is_working = today_attendance is not None
-        clock_in_time = today_attendance.clock_in.isoformat() if today_attendance else None
+        
+        latest_attendance = db.query(models.Attendance).filter(
+            models.Attendance.user_id == emp.id
+        ).order_by(models.Attendance.clock_in.desc()).first()
+        
+        clock_in_time = None
+        clock_out_time = None
+        fine_amount = 0.0
+        
+        if is_working and today_attendance:
+            clock_in_time = today_attendance.clock_in.isoformat()
+            clock_out_time = None
+            fine_amount = 0.0
+        elif latest_attendance:
+            clock_in_time = latest_attendance.clock_in.isoformat()
+            clock_out_time = latest_attendance.clock_out.isoformat() if latest_attendance.clock_out else None
+            fine_amount = latest_attendance.fine_amount if latest_attendance.fine_amount else 0.0
         
         total_tasks = db.query(models.Task).filter(models.Task.user_id == emp.id).count()
         completed = db.query(models.Task).filter(
@@ -544,6 +638,8 @@ def get_dashboard_stats(admin: models.User = Depends(get_current_admin), db: Ses
             "username": emp.username,
             "status": "Working" if is_working else "Offline",
             "clock_in_time": clock_in_time,
+            "clock_out_time": clock_out_time,
+            "fine_amount": fine_amount,
             "tasks_completed": completed,
             "tasks_total": total_tasks,
             "tasks_progress": f"{completed}/{total_tasks}"

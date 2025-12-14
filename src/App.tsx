@@ -13,7 +13,7 @@ interface ProtectedRouteProps {
 }
 
 function ProtectedRoute({ children }: ProtectedRouteProps) {
-  const token = localStorage.getItem('authToken');
+  const token = sessionStorage.getItem('authToken');
   
   if (!token) {
     return <Navigate to="/login" replace />;

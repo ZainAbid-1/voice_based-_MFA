@@ -17,6 +17,7 @@ class User(Base):
     
     # Security fields
     failed_attempts = Column(Integer, default=0)
+    lockout_level = Column(Integer, default=0)
     locked_until = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     last_login = Column(DateTime, nullable=True)

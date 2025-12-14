@@ -30,6 +30,8 @@ interface Employee {
   username: string;
   status: string;
   clock_in_time: string | null;
+  clock_out_time: string | null;
+  fine_amount: number;
   tasks_completed: number;
   tasks_total: number;
   tasks_progress: string;
@@ -55,6 +57,19 @@ interface User {
 
 const COLORS = ['#10b981', '#ef4444', '#f59e0b', '#3b82f6'];
 
+const formatDate = (dateString: string | null) => {
+  if (!dateString) return '-';
+  const utcString = dateString.endsWith('Z') ? dateString : `${dateString}Z`;
+  const date = new Date(utcString);
+  return date.toLocaleString('en-US', { 
+    month: 'short', 
+    day: 'numeric', 
+    hour: '2-digit', 
+    minute: '2-digit',
+    hour12: true 
+  });
+};
+
 export default function AdminDashboard({ darkMode, setDarkMode }: AdminDashboardProps) {
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -68,7 +83,7 @@ export default function AdminDashboard({ darkMode, setDarkMode }: AdminDashboard
   const [taskDescription, setTaskDescription] = useState('');
   const [isAssigning, setIsAssigning] = useState(false);
   
-  const token = localStorage.getItem('authToken');
+  const token = sessionStorage.getItem('authToken');
 
   useEffect(() => {
     if (!token) {
@@ -137,8 +152,8 @@ export default function AdminDashboard({ darkMode, setDarkMode }: AdminDashboard
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('authToken');
-    localStorage.removeItem('username');
+    sessionStorage.removeItem('authToken');
+    sessionStorage.removeItem('username');
     navigate('/');
   };
 
@@ -424,6 +439,8 @@ export default function AdminDashboard({ darkMode, setDarkMode }: AdminDashboard
                       <th className="px-6 py-4 text-left text-sm font-semibold text-gray-700 dark:text-gray-300">Employee</th>
                       <th className="px-6 py-4 text-left text-sm font-semibold text-gray-700 dark:text-gray-300">Status</th>
                       <th className="px-6 py-4 text-left text-sm font-semibold text-gray-700 dark:text-gray-300">Clock In Time</th>
+                      <th className="px-6 py-4 text-left text-sm font-semibold text-gray-700 dark:text-gray-300">Clock Out Time</th>
+                      <th className="px-6 py-4 text-left text-sm font-semibold text-gray-700 dark:text-gray-300">Fine</th>
                       <th className="px-6 py-4 text-left text-sm font-semibold text-gray-700 dark:text-gray-300">Tasks Progress</th>
                     </tr>
                   </thead>
@@ -457,14 +474,32 @@ export default function AdminDashboard({ darkMode, setDarkMode }: AdminDashboard
                             <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
                               <Clock className="w-4 h-4" />
                               <span className="text-sm">
-                                {new Date(employee.clock_in_time).toLocaleTimeString(undefined, { 
-                                  hour: '2-digit', 
-                                  minute: '2-digit' 
-                                })}
+                                {formatDate(employee.clock_in_time)}
                               </span>
                             </div>
                           ) : (
                             <span className="text-sm text-gray-400">-</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4">
+                          {employee.clock_out_time ? (
+                            <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
+                              <Clock className="w-4 h-4" />
+                              <span className="text-sm">
+                                {formatDate(employee.clock_out_time)}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-sm text-gray-400">-</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4">
+                          {employee.fine_amount > 0 ? (
+                            <span className="text-sm font-semibold text-red-600 dark:text-red-400">
+                              ${employee.fine_amount.toFixed(1)}
+                            </span>
+                          ) : (
+                            <span className="text-sm text-gray-400">$0.0</span>
                           )}
                         </td>
                         <td className="px-6 py-4">
@@ -488,7 +523,7 @@ export default function AdminDashboard({ darkMode, setDarkMode }: AdminDashboard
                     ))}
                     {stats.employee_list.length === 0 && (
                       <tr>
-                        <td colSpan={4} className="px-6 py-8 text-center text-gray-500 dark:text-gray-400">
+                        <td colSpan={6} className="px-6 py-8 text-center text-gray-500 dark:text-gray-400">
                           No employees found
                         </td>
                       </tr>

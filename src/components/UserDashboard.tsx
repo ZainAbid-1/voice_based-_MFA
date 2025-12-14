@@ -34,8 +34,8 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-  const token = localStorage.getItem('authToken');
-  const username = localStorage.getItem('username') || 'User';
+  const token = sessionStorage.getItem('authToken');
+  const username = sessionStorage.getItem('username') || 'User';
 
   useEffect(() => {
     if (!token) {
@@ -43,11 +43,11 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
       return;
     }
 
-    const clockIn = location.state?.clock_in_time || localStorage.getItem('clock_in_time');
+    const clockIn = location.state?.clock_in_time || sessionStorage.getItem('clock_in_time');
     if (clockIn) {
       setClockInTime(clockIn);
       setIsClocked(true);
-      localStorage.setItem('clock_in_time', clockIn);
+      sessionStorage.setItem('clock_in_time', clockIn);
     }
 
     fetchTasks();
@@ -157,7 +157,7 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
 
       setClockOutResult(response.data);
       setIsClocked(false);
-      localStorage.removeItem('clock_in_time');
+      sessionStorage.removeItem('clock_in_time');
       
       setTimeout(() => {
         setShowClockOutModal(false);
@@ -181,9 +181,9 @@ export default function UserDashboard({ darkMode, setDarkMode }: UserDashboardPr
       setTimeout(() => setErrorMessage(''), 5000);
       return;
     }
-    localStorage.removeItem('authToken');
-    localStorage.removeItem('username');
-    localStorage.removeItem('clock_in_time');
+    sessionStorage.removeItem('authToken');
+    sessionStorage.removeItem('username');
+    sessionStorage.removeItem('clock_in_time');
     navigate('/');
   };
 

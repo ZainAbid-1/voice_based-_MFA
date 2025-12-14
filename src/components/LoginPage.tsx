@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { User, Lock, Mic, ArrowLeft, Moon, Sun, Eye, EyeOff, AlertTriangle, Square, RefreshCw } from 'lucide-react';
@@ -27,9 +27,58 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
+  const [lockedUntil, setLockedUntil] = useState<string | null>(null);
+  const [remainingTime, setRemainingTime] = useState<string>('');
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+
+  useEffect(() => {
+    if (!lockedUntil) {
+      setRemainingTime('');
+      return;
+    }
+
+    const updateRemainingTime = () => {
+      const now = new Date();
+      const lockTime = new Date(lockedUntil);
+      const diff = lockTime.getTime() - now.getTime();
+
+      if (diff <= 0) {
+        setLockedUntil(null);
+        setRemainingTime('');
+        setErrorMessage('');
+        return;
+      }
+
+      const hours = Math.floor(diff / (1000 * 60 * 60));
+      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+      const lockTimeLocal = lockTime.toLocaleString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZoneName: 'short'
+      });
+
+      if (hours > 0) {
+        setRemainingTime(`Account locked until ${lockTimeLocal} (${hours}h ${minutes}m ${seconds}s remaining)`);
+      } else if (minutes > 0) {
+        setRemainingTime(`Account locked until ${lockTimeLocal} (${minutes}m ${seconds}s remaining)`);
+      } else {
+        setRemainingTime(`Account locked until ${lockTimeLocal} (${seconds}s remaining)`);
+      }
+    };
+
+    updateRemainingTime();
+    const interval = setInterval(updateRemainingTime, 1000);
+
+    return () => clearInterval(interval);
+  }, [lockedUntil]);
 
   // --- STEP 1: GET CHALLENGE (UPDATED TO POST) ---
   const handleCredentialsSubmit = async () => {
@@ -53,8 +102,17 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
       }
     } catch (error: any) {
       console.error("Challenge Error:", error);
-      if (error.response?.status === 401) {
-        setErrorMessage("Invalid Username or PIN."); // Unified error message
+      if (error.response?.status === 403) {
+        const detail = error.response?.data?.detail || "";
+        const parts = detail.split("|");
+        if (parts.length === 2) {
+          setLockedUntil(parts[1]);
+          setErrorMessage(parts[0]);
+        } else {
+          setErrorMessage(detail);
+        }
+      } else if (error.response?.status === 401) {
+        setErrorMessage("Invalid Username or PIN.");
       } else if (error.response?.status === 404) {
         setErrorMessage("User not found.");
       } else if (error.code === "ERR_NETWORK") {
@@ -121,12 +179,12 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
 
       if (response.status === 200) {
         if (response.data.token) {
-          localStorage.setItem('authToken', response.data.token);
+          sessionStorage.setItem('authToken', response.data.token);
         }
         if (response.data.role) {
-          localStorage.setItem('userRole', response.data.role);
+          sessionStorage.setItem('userRole', response.data.role);
         }
-        localStorage.setItem('username', username);
+        sessionStorage.setItem('username', username);
         
         if (response.data.role === 'admin') {
           navigate('/admin');
@@ -140,7 +198,16 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
       }
     } catch (error: any) {
       console.error("Login failed", error);
-      if (error.response?.data?.detail) {
+      if (error.response?.status === 403) {
+        const detail = error.response?.data?.detail || "";
+        const parts = detail.split("|");
+        if (parts.length === 2) {
+          setLockedUntil(parts[1]);
+          setErrorMessage(parts[0]);
+        } else {
+          setErrorMessage(detail);
+        }
+      } else if (error.response?.data?.detail) {
         setErrorMessage(error.response.data.detail);
       } else {
         setErrorMessage("Authentication failed.");
@@ -191,7 +258,10 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
           {errorMessage && (
             <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
-              <p className="text-sm text-red-700 dark:text-red-300">{errorMessage}</p>
+              <div className="text-sm text-red-700 dark:text-red-300">
+                <p>{errorMessage}</p>
+                {remainingTime && <p className="mt-1 font-medium">{remainingTime}</p>}
+              </div>
             </div>
           )}
 
@@ -230,7 +300,13 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                     <input
                       type={showPin ? "text" : "password"}
                       value={pin}
-                      onChange={(e) => setPin(e.target.value)}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (/^\d{0,4}$/.test(value)) {
+                          setPin(value);
+                        }
+                      }}
+                      maxLength={4}
                       className="w-full pl-12 pr-12 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-gray-900 dark:text-white"
                       placeholder="Enter PIN"
                     />
@@ -242,11 +318,14 @@ export default function LoginPage({ darkMode, setDarkMode }: LoginPageProps) {
                       {showPin ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                     </button>
                   </div>
+                  <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                    PIN must be exactly 4 digits
+                  </p>
                 </div>
 
                 <button
                   onClick={handleCredentialsSubmit}
-                  disabled={!username || !pin || isProcessing}
+                  disabled={!username || pin.length !== 4 || isProcessing || !!lockedUntil}
                   className="w-full py-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 disabled:from-gray-400 disabled:to-gray-500 text-white rounded-xl shadow-lg hover:shadow-xl transition-all disabled:cursor-not-allowed"
                 >
                   {isProcessing ? "Verifying..." : "Get Challenge Code"}
